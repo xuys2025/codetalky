@@ -1,0 +1,20 @@
+# 官方固件仓库：只读参考，有自己的 .git
+/Metalio-E-INK4/
+
+# 依赖与构建产物
+node_modules/
+dist/
+build/
+*.wasm
+
+# 本机配置与密钥
+.env
+.env.*
+*.log
+
+# 仿真器编译产物
+/simulator/web/gen/
+
+# 字体文件体积大，不进仓库；来源见 third_party/fonts/README.md
+/third_party/fonts/*
+!/third_party/fonts/README.md

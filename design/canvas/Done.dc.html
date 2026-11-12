@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>完成汇报 · 紧凑版</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700;800&family=Noto+Sans+SC:wght@500;700&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+button{font:inherit;color:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width: 480px; height: 800px; box-sizing: border-box; background: #fff; color: #000; font-family: 'Noto Sans SC', sans-serif; font-weight: 500; display: flex; flex-direction: column">
+<div style="height: 36px; padding: 0 14px; background: #000; color: #fff; display: flex; align-items: center; justify-content: space-between; font-family: 'JetBrains Mono', 'Noto Sans SC', monospace; font-size: 18px; font-weight: 700">
+<span>codetalky</span>
+<span>14:32 · 82%</span>
+</div>
+<div style="height: 50px; padding: 0 14px; display: flex; align-items: center; gap: 12px; border-bottom: 3px solid #000; font-family: 'JetBrains Mono', 'Noto Sans SC', monospace">
+<span style="font-size: 24px; font-weight: 800">CodeTalky</span>
+<span style="flex-grow: 1; font-size: 18px">claude · fable-5.2</span>
+<span style="background: #000; color: #fff; font-size: 18px; font-weight: 700; padding: 2px 10px">完成</span>
+</div>
+<div style="height: 34px; padding: 0 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 2px solid #000; font-family: 'JetBrains Mono', 'Noto Sans SC', monospace; font-size: 18px">
+<span>用时 4 分 · 读 2 · 改 1 · 新 1</span>
+<span style="font-weight: 700">+84 −3</span>
+</div>
+<div style="flex: 1; min-height: 0; overflow: hidden; padding: 10px 14px 0; font-size: 20px; line-height: 27px">
+<p style="margin: 0">“完成汇报”界面已经加到<span style="text-decoration: underline; text-underline-offset: 4px">设计稿</span>最右边，现在一共七张。</p>
+<p style="margin: 8px 0 0">会话做完时弹出这一页，内容是：</p>
+<ul style="margin: 2px 0 0; padding-left: 22px">
+<li><span style="font-weight: 700">它的汇报</span>：agent 收尾时写的那段总结，原样显示。</li>
+<li><span style="font-weight: 700">结果</span>：改了几个文件、加减多少行、测试通过多少。</li>
+<li><span style="font-weight: 700">改动的文件</span>：前三个文件和各自的加减行数，其余的在下一页，音量键翻过去。</li>
+<li><span style="font-weight: 700">两个按钮</span>：“知道了”收起这条；“回复”发下一步指令，也可以直接按住 BOOT 说。</li>
+<li><span style="font-weight: 700">顶部</span>：项目名、agent 和模型、总用时。</li>
+</ul>
+<p style="margin: 8px 0 0">两点说明：</p>
+<ul style="margin: 2px 0 0; padding-left: 22px">
+<li>测试通过数是从它跑的测试命令输出里读的，没跑测试的会话这一格不显示。</li>
+<li>这张我同样没有渲染检查，有溢出或错位请告诉我。</li>
+</ul>
+<p style="margin: 8px 0 0">计划书里也补上了这个界面。七张都确认的话，我就开始用 LVGL 写进仿真器。</p>
+</div>
+<div style="height: 80px; padding: 0 14px; display: flex; align-items: center; gap: 12px; border-top: 3px solid #000; font-family: 'JetBrains Mono', 'Noto Sans SC', monospace">
+<span style="flex-grow: 1; font-size: 18px; line-height: 1.4">1/1 页<br>音量键翻页</span>
+<button style="width: 124px; height: 62px; background: #fff; border: 3px solid #000; font-size: 22px; font-weight: 800">知道了</button>
+<button style="width: 124px; height: 62px; background: #000; color: #fff; border: 3px solid #000; font-size: 22px; font-weight: 800">回复</button>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":480,"height":800}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

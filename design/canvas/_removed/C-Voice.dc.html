@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>C 按键 · 语音确认</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@500;700;900&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+button{font:inherit;color:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width: 480px; height: 800px; box-sizing: border-box; background: #fff; color: #000; font-family: 'Noto Sans SC', sans-serif; font-weight: 500; padding: 0 20px; display: flex; flex-direction: column">
+<div style="height: 52px; display: flex; align-items: center; justify-content: space-between; font-size: 22px; font-weight: 700">
+<span>14:32</span>
+<span>已连接 · 82%</span>
+</div>
+<h1 style="margin: 14px 0 0; font-size: 48px; font-weight: 900; letter-spacing: 2px">是这句吗</h1>
+<p style="margin: 6px 0 0; font-size: 24px; font-weight: 700">发给 codetalky · Claude Code</p>
+<div style="margin-top: 22px; background: #000; color: #fff; border-radius: 28px 28px 28px 6px; padding: 28px 24px; font-size: 34px; font-weight: 700; line-height: 1.5">把刚才失败的两个测试修好，然后重新跑一遍。</div>
+<div style="flex-grow: 1"></div>
+<div style="display: flex; gap: 14px">
+<button style="flex: 1; height: 124px; background: #fff; border: 4px solid #000; border-radius: 30px; font-size: 40px; font-weight: 900; letter-spacing: 4px">重说</button>
+<button style="flex: 1; height: 124px; background: #000; color: #fff; border: 4px solid #000; border-radius: 30px; font-size: 40px; font-weight: 900; letter-spacing: 4px">发送</button>
+</div>
+<p style="margin: 0; height: 64px; display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 700">识别错了点重说，再按住 BOOT</p>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":480,"height":800}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

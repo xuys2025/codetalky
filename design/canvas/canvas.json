@@ -1,0 +1,44 @@
+{
+  "v": 3,
+  "createdOnFiles": { "v": 1, "at": "2026-11-13T09:40:00Z" },
+  "title": "CodeTalky 界面风格方向",
+  "launch": { "view": "canvas" },
+  "pages": [],
+  "boards": {
+    "Main.dc.html": { "x": 0, "y": 0, "w": 480, "h": 800, "title": "会话列表" },
+    "Detail-1.dc.html": { "x": 560, "y": 0, "w": 480, "h": 800, "title": "会话详情 1/3 · 概览" },
+    "Detail-2.dc.html": { "x": 1120, "y": 0, "w": 480, "h": 800, "title": "会话详情 2/3 · 活动" },
+    "Detail-3.dc.html": { "x": 1680, "y": 0, "w": 480, "h": 800, "title": "会话详情 3/3 · 改动" },
+    "Approve.dc.html": { "x": 2240, "y": 0, "w": 480, "h": 800, "title": "批准 · 带改动预览" },
+    "Voice.dc.html": { "x": 2800, "y": 0, "w": 480, "h": 800, "title": "语音确认" },
+    "Done-Old.dc.html": { "x": 0, "y": 1240, "w": 480, "h": 800, "title": "旧版式 · 只放得下开头 3 行" },
+    "Done.dc.html": { "x": 560, "y": 1240, "w": 480, "h": 800, "title": "紧凑版 · 整段放在一页" },
+    "Font-A-BW.dc.html": { "x": 0, "y": 2480, "w": 480, "h": 800, "title": "更纱黑体 · 操作时（纯黑白）" },
+    "Font-A-Gray.dc.html": { "x": 560, "y": 2480, "w": 480, "h": 800, "title": "更纱黑体 · 停下后（叠加灰度）" },
+    "Font-B-BW.dc.html": { "x": 1120, "y": 2480, "w": 480, "h": 800, "title": "MiSans · 操作时（纯黑白）" },
+    "Font-B-Gray.dc.html": { "x": 1680, "y": 2480, "w": 480, "h": 800, "title": "MiSans · 停下后（叠加灰度）" }
+  },
+  "order": [
+    "Main.dc.html",
+    "Detail-1.dc.html",
+    "Detail-2.dc.html",
+    "Detail-3.dc.html",
+    "Approve.dc.html",
+    "Voice.dc.html",
+    "Done-Old.dc.html",
+    "Done.dc.html",
+    "Font-A-BW.dc.html",
+    "Font-A-Gray.dc.html",
+    "Font-B-BW.dc.html",
+    "Font-B-Gray.dc.html"
+  ],
+  "notes": {
+    "rowD": { "x": 0, "y": -300, "text": "工作台：agent 在做什么、想什么、改了什么，都摆出来", "kind": "title1", "maxW": 3280 },
+    "rowE": { "x": 0, "y": 940, "text": "完成汇报：放上一条真实回复", "kind": "title1", "maxW": 1040 },
+    "rowF": { "x": 0, "y": 2180, "text": "真机像素实测：操作时纯黑白，停下后叠加灰度", "kind": "title1", "maxW": 2160 },
+    "scale": { "x": -440, "y": 0, "w": 360, "text": "每张都是 480×800，和真机像素一一对应。真机屏幕只有一张银行卡那么大（约 5.2 × 8.6 厘米），所以这里看到的比实物大一倍左右。", "fill": "gray" },
+    "paging": { "x": -440, "y": 540, "w": 360, "text": "会话详情有三页：概览、活动、改动。音量上下键翻页，屏幕下方的上一页、下一页键也行。", "fill": "gray" },
+    "fontnote": { "x": -440, "y": 2480, "w": 360, "text": "这一排不是浏览器画的：字是用字体文件按真机像素栅格化的，灰度按官方驱动的做法只有白、浅灰、深灰、黑四档，底色和墨色按屏幕数据手册的对比度调过。上面两排是浏览器示意稿，会比真机好看。", "fill": "gray" }
+  },
+  "designSystems": []
+}

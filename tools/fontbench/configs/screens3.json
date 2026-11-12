@@ -1,0 +1,21 @@
+{
+  "levels": [2],
+  "sets": [
+    {
+      "slug": "v2-misans-20",
+      "body_size": 20,
+      "line_height": 27,
+      "text": { "path": "D:/CodeTalky/Metalio-E-INK4/tools/ttf-fonts/MiSans/MiSans-Regular.ttf" },
+      "bold": { "path": "D:/CodeTalky/Metalio-E-INK4/tools/ttf-fonts/MiSans/MiSans-Semibold.ttf" },
+      "mono": { "path": "D:/CodeTalky/third_party/fonts/jetbrains-mono/JetBrainsMono-Medium.ttf" }
+    },
+    {
+      "slug": "v2-misans-22",
+      "body_size": 22,
+      "line_height": 29,
+      "text": { "path": "D:/CodeTalky/Metalio-E-INK4/tools/ttf-fonts/MiSans/MiSans-Regular.ttf" },
+      "bold": { "path": "D:/CodeTalky/Metalio-E-INK4/tools/ttf-fonts/MiSans/MiSans-Semibold.ttf" },
+      "mono": { "path": "D:/CodeTalky/third_party/fonts/jetbrains-mono/JetBrainsMono-Medium.ttf" }
+    }
+  ]
+}

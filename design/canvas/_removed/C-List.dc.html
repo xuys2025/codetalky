@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>C 按键 · 会话列表</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@500;700;900&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+button{font:inherit;color:inherit;border:0;text-align:left;cursor:pointer}
+</style>
+</helmet>
+<div style="width: 480px; height: 800px; box-sizing: border-box; background: #fff; color: #000; font-family: 'Noto Sans SC', sans-serif; font-weight: 500; padding: 0 20px; display: flex; flex-direction: column">
+<div style="height: 52px; display: flex; align-items: center; justify-content: space-between; font-size: 22px; font-weight: 700">
+<span>14:32</span>
+<span>已连接 · 82%</span>
+</div>
+<div style="height: 84px; display: flex; align-items: center; justify-content: space-between">
+<h1 style="margin: 0; font-size: 48px; font-weight: 900; letter-spacing: 2px">会话</h1>
+<span style="background: #000; color: #fff; border-radius: 999px; padding: 10px 22px; font-size: 24px; font-weight: 900">2 个在等你</span>
+</div>
+<div style="display: flex; flex-direction: column; gap: 14px">
+<button style="display: block; width: 100%; height: 132px; box-sizing: border-box; padding: 0 22px; background: #000; color: #fff; border-radius: 26px">
+<span style="display: flex; align-items: center; justify-content: space-between">
+<span style="font-size: 32px; font-weight: 900">codetalky</span>
+<span style="background: #fff; color: #000; border-radius: 999px; padding: 4px 16px; font-size: 22px; font-weight: 900">等批准</span>
+</span>
+<span style="display: flex; justify-content: space-between; gap: 14px; margin-top: 12px; font-size: 24px">
+<span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis">想运行 npm install sharp</span>
+<span style="flex-shrink: 0; font-weight: 700">Claude</span>
+</span>
+</button>
+<button style="display: block; width: 100%; height: 132px; box-sizing: border-box; padding: 0 22px; background: #000; color: #fff; border-radius: 26px">
+<span style="display: flex; align-items: center; justify-content: space-between">
+<span style="font-size: 32px; font-weight: 900">blog-engine</span>
+<span style="background: #fff; color: #000; border-radius: 999px; padding: 4px 16px; font-size: 22px; font-weight: 900">等回答</span>
+</span>
+<span style="display: flex; justify-content: space-between; gap: 14px; margin-top: 12px; font-size: 24px">
+<span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis">问：会话状态存在哪里</span>
+<span style="flex-shrink: 0; font-weight: 700">Codex</span>
+</span>
+</button>
+<button style="display: block; width: 100%; height: 132px; box-sizing: border-box; padding: 0 18px; background: #fff; border: 4px solid #000; border-radius: 26px">
+<span style="display: flex; align-items: center; justify-content: space-between">
+<span style="font-size: 32px; font-weight: 900">firmware</span>
+<span style="font-size: 22px; font-weight: 900">运行中</span>
+</span>
+<span style="display: flex; justify-content: space-between; gap: 14px; margin-top: 12px; font-size: 24px">
+<span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis">正在改 epd_driver.c</span>
+<span style="flex-shrink: 0; font-weight: 700">Claude</span>
+</span>
+</button>
+<button style="display: block; width: 100%; height: 132px; box-sizing: border-box; padding: 0 18px; background: #fff; border: 4px solid #000; border-radius: 26px">
+<span style="display: flex; align-items: center; justify-content: space-between">
+<span style="font-size: 32px; font-weight: 900">api-server</span>
+<span style="font-size: 22px; font-weight: 900">已完成</span>
+</span>
+<span style="display: flex; justify-content: space-between; gap: 14px; margin-top: 12px; font-size: 24px">
+<span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis">12 个测试全部通过</span>
+<span style="flex-shrink: 0; font-weight: 700">Codex</span>
+</span>
+</button>
+</div>
+<div style="flex-grow: 1; display: flex; align-items: center; justify-content: space-between; font-size: 22px; font-weight: 700">
+<span>1 / 2 页</span>
+<span>按住 BOOT 说话</span>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":480,"height":800}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

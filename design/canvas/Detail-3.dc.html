@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>紧凑版 · 会话详情 · 改动</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700;800&family=Noto+Sans+SC:wght@500;700&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.row{display:flex;gap:8px;border-bottom:1px solid #000}
+.m{width:18px;font-weight:800}
+.p{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.s{font-weight:700}
+.d{padding:0 8px;white-space:pre}
+.a{padding:0 8px;white-space:pre;background:#000;color:#fff}
+</style>
+</helmet>
+<div style="width: 480px; height: 800px; box-sizing: border-box; background: #fff; color: #000; font-family: 'JetBrains Mono', 'Noto Sans SC', monospace; font-weight: 500; display: flex; flex-direction: column">
+<div style="height: 36px; padding: 0 14px; background: #000; color: #fff; display: flex; align-items: center; justify-content: space-between; font-size: 18px; font-weight: 700">
+<span>codetalky</span>
+<span>14:32 · 82%</span>
+</div>
+<div style="height: 50px; padding: 0 14px; display: flex; align-items: center; gap: 12px; border-bottom: 3px solid #000">
+<span style="font-size: 24px; font-weight: 800">firmware</span>
+<span style="flex-grow: 1; font-size: 18px">fix/refresh</span>
+<span style="font-size: 22px; font-weight: 800">+132 −40</span>
+</div>
+<div style="padding: 0 14px; display: flex; flex-direction: column; flex-grow: 1">
+<div style="display: flex; align-items: center; gap: 8px; margin: 8px 0 2px"><span style="background: #000; color: #fff; font-size: 18px; font-weight: 700; padding: 0 7px">改动的文件 · 4</span><span style="flex: 1; height: 2px; background: #000"></span></div>
+<div style="font-size: 20px; line-height: 34px">
+<div class="row"><span class="m">M</span><span class="p">display/epd_driver.c</span><span class="s">+54 −28</span></div>
+<div class="row"><span class="m">M</span><span class="p">display/lv_adapter.cc</span><span class="s">+12 −9</span></div>
+<div class="row"><span class="m">M</span><span class="p">boards/config.h</span><span class="s">+8 −3</span></div>
+<div class="row" style="border-bottom: 3px solid #000"><span class="m">A</span><span class="p">tests/test_refresh.py</span><span class="s">+58</span></div>
+</div>
+<div style="display: flex; align-items: center; gap: 8px; margin: 10px 0 4px"><span style="background: #000; color: #fff; font-size: 18px; font-weight: 700; padding: 0 7px">epd_driver.c:214</span><span style="flex: 1; height: 2px; background: #000"></span><span style="font-size: 18px; font-weight: 700">+5 −1</span></div>
+<div style="border: 2px solid #000; font-size: 18px; line-height: 26px; overflow: hidden">
+<div class="d">  static int partial_n;</div>
+<div class="d">  void epd_flush(rect_t r) {</div>
+<div class="d">−   epd_refresh(PARTIAL);</div>
+<div class="a">+   if (++partial_n &gt;= 8) {</div>
+<div class="a">+     epd_refresh(FULL);</div>
+<div class="a">+     partial_n = 0;</div>
+<div class="a">+   } else {</div>
+<div class="a">+     epd_refresh(PARTIAL);</div>
+<div class="d">    }</div>
+<div class="d">    epd_wait_busy();</div>
+</div>
+<div style="display: flex; align-items: center; gap: 8px; margin: 10px 0 4px"><span style="background: #000; color: #fff; font-size: 18px; font-weight: 700; padding: 0 7px">config.h:31</span><span style="flex: 1; height: 2px; background: #000"></span><span style="font-size: 18px; font-weight: 700">+3 −1</span></div>
+<div style="border: 2px solid #000; font-size: 18px; line-height: 26px; overflow: hidden">
+<div class="d">− #define EPD_FULL_EVERY 0</div>
+<div class="a">+ #define EPD_FULL_EVERY 8</div>
+<div class="a">+ #define EPD_FAST_MS 420</div>
+<div class="a">+ #define EPD_PARTIAL_MS 260</div>
+</div>
+<div style="flex-grow: 1; display: flex; align-items: center; justify-content: space-between; font-size: 18px">
+<span>3/3 改动 · 共 7 处</span>
+<span>音量键翻页</span>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":480,"height":800}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

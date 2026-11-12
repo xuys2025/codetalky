@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>紧凑版 · 批准</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700;800&family=Noto+Sans+SC:wght@500;700&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+button{font:inherit;color:inherit;cursor:pointer}
+.d{padding:0 8px;white-space:pre}
+.a{padding:0 8px;white-space:pre;background:#000;color:#fff}
+</style>
+</helmet>
+<div style="width: 480px; height: 800px; box-sizing: border-box; background: #fff; color: #000; font-family: 'JetBrains Mono', 'Noto Sans SC', monospace; font-weight: 500; display: flex; flex-direction: column">
+<div style="height: 36px; padding: 0 14px; background: #000; color: #fff; display: flex; align-items: center; justify-content: space-between; font-size: 18px; font-weight: 700">
+<span>codetalky</span>
+<span>14:32 · 82%</span>
+</div>
+<div style="height: 50px; padding: 0 14px; display: flex; align-items: center; gap: 12px; border-bottom: 3px solid #000">
+<span style="font-size: 24px; font-weight: 800">codetalky</span>
+<span style="flex-grow: 1; font-size: 18px">claude · opus-5.5</span>
+<span style="background: #000; color: #fff; font-size: 18px; font-weight: 700; padding: 2px 10px">等批准</span>
+</div>
+<div style="flex: 1; min-height: 0; padding: 0 14px; display: flex; flex-direction: column">
+<div style="display: flex; align-items: center; gap: 8px; margin-top: 10px"><span style="background: #000; color: #fff; font-size: 18px; font-weight: 700; padding: 0 7px">想改这个文件</span><span style="flex: 1; height: 2px; background: #000"></span></div>
+<div style="display: flex; align-items: center; gap: 8px; margin-top: 6px"><span style="flex-shrink: 0; border: 2px solid #000; font-size: 18px; font-weight: 700; padding: 0 5px">Edit</span><span style="flex: 1; font-size: 20px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">src/bridge/hooks.ts</span><span style="font-size: 20px; font-weight: 800">+4 −1</span></div>
+<div style="margin-top: 8px; border: 2px solid #000; font-size: 18px; line-height: 26px; overflow: hidden">
+<div class="d">  // 等设备回话的最长时间</div>
+<div class="d">− const TIMEOUT_S = 60;</div>
+<div class="a">+ const TIMEOUT_S = 600;</div>
+<div class="d">  export async function onPermission(req) {</div>
+<div class="a">+   if (!req.sessionId) {</div>
+<div class="a">+     return deny('no session');</div>
+<div class="a">+   }</div>
+<div class="d">    const card = toCard(req);</div>
+<div class="d">    return await askDevice(card, TIMEOUT_S);</div>
+</div>
+<div style="display: flex; align-items: center; gap: 8px; margin-top: 10px"><span style="background: #000; color: #fff; font-size: 18px; font-weight: 700; padding: 0 7px">它的理由</span><span style="flex: 1; height: 2px; background: #000"></span></div>
+<p style="margin: 6px 0 0; font-family: 'Noto Sans SC', sans-serif; font-size: 20px; line-height: 27px">60 秒太短，在设备上来不及点。改成 600 秒，并拒绝没带会话号的请求。</p>
+<div style="display: flex; align-items: center; gap: 8px; margin-top: 10px"><span style="background: #000; color: #fff; font-size: 18px; font-weight: 700; padding: 0 7px">这一轮</span><span style="flex: 1; height: 2px; background: #000"></span></div>
+<div style="display: flex; justify-content: space-between; margin-top: 6px; font-size: 20px"><span>读 12 · 改 3 · 命令 2</span><span style="font-weight: 800">+86 −21</span></div>
+<div style="margin-top: 4px; font-size: 18px">任务 2/4 · 下一步：补超时的测试</div>
+</div>
+<div style="height: 34px; padding: 0 14px; display: flex; align-items: center; justify-content: space-between; font-size: 18px">
+<span>09:12 后回电脑确认</span>
+<span>音量键看完整改动</span>
+</div>
+<div style="height: 84px; padding: 0 14px; display: flex; align-items: center; gap: 12px; border-top: 3px solid #000">
+<button style="flex: 1; height: 62px; background: #fff; border: 3px solid #000; font-size: 26px; font-weight: 800">拒绝</button>
+<button style="flex: 1; height: 62px; background: #000; color: #fff; border: 3px solid #000; font-size: 26px; font-weight: 800">批准</button>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":480,"height":800}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

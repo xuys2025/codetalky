@@ -1,0 +1,23 @@
+{
+  "levels": [2, "overlay"],
+  "sets": [
+    {
+      "slug": "r2-misans",
+      "tones": true,
+      "body_size": 20,
+      "line_height": 27,
+      "text": { "path": "D:/CodeTalky/Metalio-E-INK4/tools/ttf-fonts/MiSans/MiSans-Regular.ttf" },
+      "bold": { "path": "D:/CodeTalky/Metalio-E-INK4/tools/ttf-fonts/MiSans/MiSans-Semibold.ttf" },
+      "mono": { "path": "D:/CodeTalky/third_party/fonts/jetbrains-mono/JetBrainsMono-Medium.ttf" }
+    },
+    {
+      "slug": "r2-sarasa-native",
+      "tones": true,
+      "body_size": 20,
+      "line_height": 27,
+      "text": { "path": "D:/CodeTalky/third_party/fonts/sarasa-ui-sc/SarasaUiSC-Regular.ttf", "hinting": "native" },
+      "bold": { "path": "D:/CodeTalky/third_party/fonts/sarasa-ui-sc/SarasaUiSC-SemiBold.ttf", "hinting": "native" },
+      "mono": { "path": "D:/CodeTalky/third_party/fonts/jetbrains-mono/JetBrainsMono-Medium.ttf" }
+    }
+  ]
+}

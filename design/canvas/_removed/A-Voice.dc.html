@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>A 刊物 · 语音确认</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@500;700;900&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+button{font:inherit;color:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width: 480px; height: 800px; box-sizing: border-box; background: #fff; color: #000; font-family: 'Noto Sans SC', sans-serif; padding: 0 28px; display: flex; flex-direction: column">
+<div style="height: 60px; display: flex; align-items: center; justify-content: space-between; font-size: 22px; font-weight: 500; border-bottom: 2px solid #000">
+<span>14:32</span>
+<span>电脑已连接 · 电量 82%</span>
+</div>
+<p style="margin: 28px 0 0; padding-bottom: 22px; border-bottom: 4px solid #000; font-size: 24px; font-weight: 500">你说的是这句吗</p>
+<div style="margin-top: 20px; font-family: 'Noto Serif SC', serif; font-weight: 900; font-size: 96px; line-height: 0.7; height: 52px">“</div>
+<p style="margin: 0; font-family: 'Noto Serif SC', serif; font-weight: 700; font-size: 38px; line-height: 1.45">把刚才失败的两个测试修好，然后重新跑一遍。</p>
+<div style="flex-grow: 1"></div>
+<p style="margin: 0 0 16px; font-size: 24px">发给 <span style="font-weight: 700">codetalky</span> · Claude Code</p>
+<div style="display: flex; gap: 16px">
+<button style="flex: 1; height: 100px; background: #fff; border: 3px solid #000; font-family: 'Noto Serif SC', serif; font-weight: 900; font-size: 34px; letter-spacing: 4px">重说</button>
+<button style="flex: 1; height: 100px; background: #000; color: #fff; border: 3px solid #000; font-family: 'Noto Serif SC', serif; font-weight: 900; font-size: 34px; letter-spacing: 4px">发送</button>
+</div>
+<p style="margin: 0; height: 64px; display: flex; align-items: center; justify-content: center; font-size: 22px">识别错了就点重说，再按住 BOOT 说一遍</p>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":480,"height":800}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

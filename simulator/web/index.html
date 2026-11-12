@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CodeTalky 仿真器</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f3f2ee; --fg: #1b1b1b; --muted: #666; --shell: #d9d7d0; --edge: #b9b6ad; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #17171a; --fg: #ececec; --muted: #9a9aa0; --shell: #2b2b30; --edge: #3d3d44; }
+  }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, "Microsoft YaHei", sans-serif; }
+  main { display: flex; flex-wrap: wrap; gap: 32px; justify-content: center; align-items: flex-start; padding: 24px 16px; }
+  .device { background: var(--shell); border: 1px solid var(--edge); border-radius: 22px; padding: 18px 18px 10px; }
+  .device.buzz { animation: buzz 0.06s linear infinite; }
+  @keyframes buzz { 0% { transform: translateX(-1px); } 50% { transform: translateX(1px); } 100% { transform: translateX(-1px); } }
+  canvas { display: block; width: var(--screen-w, 480px); aspect-ratio: 480 / 800; background: #e8e6de; touch-action: none; cursor: pointer; }
+  .vkeys { display: flex; justify-content: space-around; padding-top: 8px; }
+  button { font: inherit; color: inherit; background: transparent; border: 1px solid var(--edge); border-radius: 8px; padding: 6px 12px; cursor: pointer; touch-action: none; user-select: none; }
+  button:active, button.held { background: var(--fg); color: var(--bg); }
+  .panel { width: 300px; display: flex; flex-direction: column; gap: 16px; }
+  .panel h1 { margin: 0; font-size: 18px; }
+  .keys { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .muted { color: var(--muted); }
+  dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; font-variant-numeric: tabular-nums; }
+  select { font: inherit; }
+</style>
+</head>
+<body>
+<main>
+  <div class="device" id="device">
+    <canvas id="epd" width="480" height="800" aria-label="设备屏幕"></canvas>
+    <div class="vkeys">
+      <button data-key="4">HOME</button>
+      <button data-key="6">下一页</button>
+      <button data-key="5">上一页</button>
+    </div>
+  </div>
+  <div class="panel">
+    <h1>CodeTalky 仿真器</h1>
+    <div class="keys">
+      <button data-key="0" id="boot">BOOT（空格）</button>
+      <button data-key="1">POWER</button>
+      <button data-key="2">音量 +</button>
+      <button data-key="3">音量 −</button>
+    </div>
+    <label>显示大小
+      <select id="scale">
+        <option value="480">像素 1:1</option>
+        <option value="196">接近实物（3.97 寸）</option>
+      </select>
+    </label>
+    <dl>
+      <dt>上次刷新</dt><dd id="st-mode">—</dd>
+      <dt>耗时</dt><dd id="st-ms">—</dd>
+      <dt>距上次全刷</dt><dd id="st-count">0 次局刷</dd>
+      <dt>排队</dt><dd id="st-queue">0</dd>
+    </dl>
+    <p class="muted">刷新耗时和残影是占位参数，真机到货后按实测校准。屏幕按下后不会立刻变化，这是在模拟墨水屏的刷新延迟。</p>
+    <p class="muted" id="st-error"></p>
+  </div>
+</main>
+<script src="gen/codetalky_sim.js"></script>
+<script src="sim.js"></script>
+</body>
+</html>

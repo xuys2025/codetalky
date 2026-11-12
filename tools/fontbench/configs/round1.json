@@ -1,0 +1,36 @@
+{
+  "prefix": "round1",
+  "sizes": [20],
+  "fonts": [
+    {
+      "name": "Noto Sans SC 500 + JetBrains Mono (current mockups)",
+      "text": { "path": "D:/CodeTalky/third_party/fonts/noto-sans-sc/NotoSansSC-wght.ttf", "wght": 500 },
+      "code": { "path": "D:/CodeTalky/third_party/fonts/jetbrains-mono/JetBrainsMono-Medium.ttf" }
+    },
+    {
+      "name": "MiSans Light (vendor UI weight)",
+      "text": { "path": "D:/CodeTalky/Metalio-E-INK4/tools/ttf-fonts/MiSans/MiSans-Light.ttf" }
+    },
+    {
+      "name": "MiSans Regular",
+      "text": { "path": "D:/CodeTalky/Metalio-E-INK4/tools/ttf-fonts/MiSans/MiSans-Regular.ttf" }
+    },
+    {
+      "name": "MiSans Medium",
+      "text": { "path": "D:/CodeTalky/Metalio-E-INK4/tools/ttf-fonts/MiSans/MiSans-Medium.ttf" }
+    },
+    {
+      "name": "LXGW ZhenKai (vendor reading font)",
+      "text": { "path": "D:/CodeTalky/Metalio-E-INK4/tools/ttf-fonts/霞鹜臻楷.ttf" }
+    },
+    {
+      "name": "Microsoft YaHei + Consolas (reference only, not shippable)",
+      "text": { "path": "C:/Windows/Fonts/msyh.ttc", "index": 0 },
+      "code": { "path": "C:/Windows/Fonts/consola.ttf" }
+    },
+    {
+      "name": "SimSun (reference only, not shippable)",
+      "text": { "path": "C:/Windows/Fonts/simsun.ttc", "index": 0 }
+    }
+  ]
+}
