@@ -7,7 +7,14 @@
 - 项目介绍与计划书：<https://claude.ai/artifact/CviDQkserZPJPT9fmrzBWL>
 - 界面设计稿画布：<https://claude.ai/artifact/8V3tAD9ZErgLhb3kdHYjxV>
 
-这两份在 Claude 账号里，是私有的。本地 `design/canvas/` 存了画布每一张的源文件，计划书没有导出本地副本（需要的话可在页面的分享菜单里导出）。
+这两份在 Claude 账号里，是私有的。本地都有离线副本（2026-11-13 晚导出）：
+
+- 计划书：`docs/计划书.md`，三张图在 `docs/计划书-图/`。
+- 设计稿：`design/mockups/`，每张一个 HTML 和一张截图，不联网也能看。
+- 按真机像素渲染的图：`design/renders/`。
+- 画布源文件：`design/canvas/`。
+
+线上改了以后本地不会自动更新。重新导出的办法：计划书用 `tools/export-plan.mjs`，设计稿用 `tools/export-mockups.mjs`。
 
 ## 已经定下来的
 
@@ -15,7 +22,7 @@
 - 只接 Claude Code 和 Codex。
 - 界面用 LVGL 自己写，不用官方的 A2UI；官方的阅读、壁纸等应用不保留。
 - agent 接入用钩子（看状态、批准、拒绝）加托管终端（发新指令），借鉴 Kiteline。
-- 界面方向是“工作台”紧凑版：会话列表、三页会话详情（概览、活动、改动）、批准、语音确认、完成汇报。
+- 界面方向是“工作台”紧凑版：会话列表、三页会话详情（概览、活动、改动）、批准、语音确认、完成汇报。你已在计划书里把“界面风格”这一项勾选确认。
 - 内容多了就分页，音量上下键翻页。
 
 ## 还没定的
