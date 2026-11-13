@@ -4,10 +4,10 @@
 import { readFileSync, statSync } from 'node:fs';
 import { isAbsolute, relative } from 'node:path';
 
-import { LIMITS, type ApproveAsk, type Hunk } from '../protocol.ts';
+import { LIMITS, type ApproveAsk, type FileChange, type Hunk } from '../protocol.ts';
 import { diffLines, hunksFromPatch, patchStat, type PatchHunk } from './text.ts';
 
-type Input = Record<string, unknown>;
+export type Input = Record<string, unknown>;
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
 const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
@@ -97,11 +97,27 @@ export function counterOf(tool: string, created: boolean): Counter | null {
 
 export interface ToolResult {
   res?: string;
+  /** Lines added and removed in total; undefined for tools that don't change files. */
   add?: number;
   del?: number;
   hunks: Hunk[];
-  /** A Write that made a new file. */
+  /** The files it changed (Codex's apply_patch can change several at once). */
+  files: FileChange[];
+  /** It made a new file (counts as "new" rather than "edit"). */
   created: boolean;
+  /** It failed (a command that exited non-zero). */
+  bad?: boolean;
+}
+
+/** How one agent's tool calls look on the device. */
+export interface ToolKit {
+  verbOf(tool: string): string;
+  targetOf(tool: string, input: Input, cwd: string | undefined): string;
+  /** The log shows just the file name for these. */
+  isFileTool(tool: string): boolean;
+  counterOf(tool: string, created: boolean): Counter | null;
+  resultOf(tool: string, input: Input, response: unknown, cwd: string | undefined): ToolResult;
+  askOf(tool: string, input: Input, cwd: string | undefined): AskBody;
 }
 
 const lineCount = (text: string) => (text === '' ? 0 : text.replace(/\n$/, '').split('\n').length);
@@ -109,7 +125,7 @@ const lineCount = (text: string) => (text === '' ? 0 : text.replace(/\n$/, '').s
 /** Read a finished tool call's response for the log: line counts, hunks, a short result. */
 export function resultOf(tool: string, input: Input, response: unknown, cwd: string | undefined): ToolResult {
   const r = (response && typeof response === 'object' ? response : {}) as Input;
-  const out: ToolResult = { hunks: [], created: false };
+  const out: ToolResult = { hunks: [], files: [], created: false };
   const file = showPath(str(r.filePath) ?? str(input.file_path) ?? '', cwd);
   const patch = Array.isArray(r.structuredPatch) ? (r.structuredPatch as PatchHunk[]) : null;
   const fromPatch = () => {
@@ -160,6 +176,9 @@ export function resultOf(tool: string, input: Input, response: unknown, cwd: str
     default:
       break;
   }
+  if (out.add !== undefined && file && (tool === 'Edit' || tool === 'MultiEdit' || tool === 'Write')) {
+    out.files = [{ st: out.created ? 'A' : 'M', path: file, add: out.add, del: out.del ?? 0 }];
+  }
   return out;
 }
 
@@ -194,7 +213,7 @@ export function isRisky(tool: string, input: Input): boolean {
 }
 
 /** Line number (1-based) where text starts in the file, if it can be found. */
-function lineOf(path: string, text: string): number | undefined {
+export function lineOf(path: string, text: string): number | undefined {
   try {
     if (statSync(path).size > 2 * 1024 * 1024) return undefined;
     const content = readFileSync(path, 'utf8');
@@ -206,7 +225,7 @@ function lineOf(path: string, text: string): number | undefined {
   }
 }
 
-type AskBody = Omit<ApproveAsk, 'kind' | 'req' | 'until'>;
+export type AskBody = Omit<ApproveAsk, 'kind' | 'req' | 'until'>;
 
 const countLines = (lines: string[]) => ({
   add: lines.filter((l) => l.startsWith('+')).length,
@@ -249,3 +268,5 @@ export function askOf(tool: string, input: Input, cwd: string | undefined): AskB
   if (isRisky(tool, input)) ask.risky = true;
   return ask;
 }
+
+export const claudeTools: ToolKit = { verbOf, targetOf, isFileTool, counterOf, resultOf, askOf };

@@ -867,7 +867,11 @@ static void detail_changes(lv_obj_t *screen, const ct_session_t *s) {
     lv_obj_t *hunk = ct_col(content, CT_PAD, 6);
     lv_obj_set_style_pad_top(hunk, 10, 0);
     lv_obj_t *title = ct_row(hunk, 24, 0, 8);
-    snprintf(buf, sizeof(buf), "%s · 第 %d 行", ct_basename(h->file), h->line);
+    if (h->line > 0) {
+        snprintf(buf, sizeof(buf), "%s · 第 %d 行", ct_basename(h->file), h->line);
+    } else {
+        snprintf(buf, sizeof(buf), "%s", ct_basename(h->file));
+    }
     ct_label_fill(title, B20, buf);
     char stat[32];
     ct_fmt_stat(stat, sizeof(stat), h->add, h->del);
@@ -1016,7 +1020,7 @@ static void show_entry(void) {
     }
     if (hunk >= 0) {
         const ct_hunk_t *h = &s->hunks[hunk];
-        snprintf(buf, sizeof(buf), "改动 · 第 %d 行", h->line);
+        snprintf(buf, sizeof(buf), h->line > 0 ? "改动 · 第 %d 行" : "改动", h->line);
         ct_section(content, buf);
         lv_obj_t *box = ct_diff_box(content);
         for (int i = 0; i < h->line_count; i++) {

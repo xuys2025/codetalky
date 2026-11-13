@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { mergeHooks, removeHooks } from '../src/claude/hooks.ts';
+import { claudeHooks, mergeHooks, removeHooks } from '../src/claude/hooks.ts';
 import { ClaudeSource } from '../src/claude/source.ts';
 import { isRisky } from '../src/claude/tools.ts';
 import { ManualClock } from '../src/clock.ts';
@@ -271,7 +271,7 @@ test('hook settings are merged into a settings file and taken out again', () => 
     hooks: { Stop: [{ hooks: [{ type: 'command', command: 'notify-send done' }] }] },
   };
   writeFileSync(file, JSON.stringify(original));
-  const backup = mergeHooks(file, 8137, 570);
+  const backup = mergeHooks(file, claudeHooks(8137, 570));
   assert.equal(backup, `${file}.codetalky.bak`);
   const merged = JSON.parse(readFileSync(file, 'utf8'));
   assert.equal(merged.model, 'opus');
@@ -289,9 +289,9 @@ test('hook settings are merged into a settings file and taken out again', () => 
       ],
     },
   ]);
-  mergeHooks(file, 8137, 570); // again: no duplicates
+  mergeHooks(file, claudeHooks(8137, 570)); // again: no duplicates
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).hooks.Stop.length, 2);
-  removeHooks(file, 8137);
+  removeHooks(file, claudeHooks(8137, 570));
   assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), original);
-  assert.equal(removeHooks(file, 8137), null);
+  assert.equal(removeHooks(file, claudeHooks(8137, 570)), null);
 });

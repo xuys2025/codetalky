@@ -14,7 +14,8 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import { ClaudeSource } from './claude/source.ts';
-import { hookSettings, mergeHooks, removeHooks } from './claude/hooks.ts';
+import { claudeHooks, codexHooks, mergeHooks, removeHooks } from './claude/hooks.ts';
+import { codexTools } from './codex/tools.ts';
 import { fastClock, realClock } from './clock.ts';
 import { FakeAgent } from './fake/engine.ts';
 import { demoScripts } from './fake/scenario.ts';
@@ -28,7 +29,7 @@ import { startServer } from './server.ts';
 
 const USAGE = `usage: node src/main.ts [--name N] [--fake] [--fake-only IDS] [--speed N] [--hold S]
                         [--host H] [--port P] [--no-sim] [--insecure-lan]
-       node src/main.ts hooks [--merge FILE | --remove FILE] [--port P] [--hold S]
+       node src/main.ts hooks [--codex] [--merge FILE | --remove FILE] [--port P] [--hold S]
        node src/main.ts claude [claude's own options]     (or codex, or run -- CMD ...)
 
   --name N        this computer's name on the device, e.g. 台式机 (default: the computer name)
@@ -44,6 +45,7 @@ const USAGE = `usage: node src/main.ts [--name N] [--fake] [--fake-only IDS] [--
                   anyone on the network could approve on your behalf. Testing only.
 
   hooks           print hook settings that send Claude Code's events to the bridge
+  --codex         the same for Codex (merge into ~/.codex/hooks.json, then trust them with /hooks)
   --merge FILE    add them to a Claude Code settings file, e.g. ~/.claude/settings.json
                   (a copy of the old file is kept as FILE.codetalky.bak)
   --remove FILE   take them out of that file again
@@ -103,6 +105,7 @@ function main(): void {
         port: { type: 'string', default: '8137' },
         'no-sim': { type: 'boolean', default: false },
         'insecure-lan': { type: 'boolean', default: false },
+        codex: { type: 'boolean', default: false },
         merge: { type: 'string' },
         remove: { type: 'string' },
         help: { type: 'boolean', short: 'h', default: false },
@@ -124,14 +127,16 @@ function main(): void {
   const [command, ...rest] = parsed.positionals;
   if (command === 'hooks') {
     if (rest.length > 0) fail(`unexpected ${rest.join(' ')}`);
+    const set = args.codex ? codexHooks(port, hold) : claudeHooks(port, hold);
     if (args.merge) {
-      const backup = mergeHooks(args.merge, port, hold);
+      const backup = mergeHooks(args.merge, set);
       console.log(`added CodeTalky hooks to ${args.merge}${backup ? ` (old file kept as ${backup})` : ''}`);
+      if (args.codex) console.log('Codex runs new hooks only after you trust them: start codex and type /hooks once.');
     } else if (args.remove) {
-      const backup = removeHooks(args.remove, port);
+      const backup = removeHooks(args.remove, set);
       console.log(backup ? `removed CodeTalky hooks from ${args.remove} (old file kept as ${backup})` : `no CodeTalky hooks in ${args.remove}`);
     } else {
-      console.log(JSON.stringify(hookSettings(port, hold), null, 2));
+      console.log(JSON.stringify({ hooks: set.hooks }, null, 2));
     }
     return;
   }
@@ -154,6 +159,7 @@ function serve(o: ServeOptions): void {
   const hub = new Hub(realClock);
   const runs = new Runs();
   const claude = new ClaudeSource(hub, realClock, { holdSeconds: o.hold, log, runs });
+  const codex = new ClaudeSource(hub, realClock, { holdSeconds: o.hold, log, runs, agent: 'codex', tools: codexTools });
   const demoClock = o.speed === 1 ? realClock : fastClock(o.speed);
   const scripts = o.fake === null ? [] : demoScripts().filter((s) => o.fake!.length === 0 || o.fake!.includes(s.initial(0).id));
   const agents = scripts.map((script) => new FakeAgent(hub, demoClock, script));
@@ -164,7 +170,10 @@ function serve(o: ServeOptions): void {
     host: o.host,
     port: o.port,
     simDir,
-    post: { '/hooks/claude': (body, headers) => claude.handle(body, headers) },
+    post: {
+      '/hooks/claude': (body, headers) => claude.handle(body, headers),
+      '/hooks/codex': (body, headers) => codex.handle(body, headers),
+    },
     runs,
     allowRemoteDevices: o.insecureLan,
     hostName: o.name,
@@ -188,6 +197,7 @@ function serve(o: ServeOptions): void {
       const stop = () => {
         for (const agent of agents) agent.stop();
         claude.stop();
+        codex.stop();
         server.close().then(() => process.exit(0));
       };
       process.once('SIGINT', stop);

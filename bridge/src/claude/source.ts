@@ -14,7 +14,8 @@ import type { IncomingHttpHeaders } from 'node:http';
 import { RUN_HEADER, type Runs } from '../runs.ts';
 import type { PostReply } from '../server.ts';
 import { firstWords, reportFromMarkdown, shortModel } from './text.ts';
-import { askOf, counterOf, isFileTool, resultOf, targetOf, verbOf } from './tools.ts';
+import { gitBranch } from '../git.ts';
+import { claudeTools, type ToolKit } from './tools.ts';
 import { TranscriptTail, todosFrom } from './transcript.ts';
 
 export interface ClaudeOptions {
@@ -22,6 +23,10 @@ export interface ClaudeOptions {
   holdSeconds: number;
   /** Managed runs (codetalky claude): their sessions can take instructions from the device. */
   runs?: Runs;
+  /** Which agent's hooks these are (default claude). */
+  agent?: 'claude' | 'codex';
+  /** How that agent's tools look on the device (default Claude Code's). */
+  tools?: ToolKit;
   log: (line: string) => void;
 }
 
@@ -80,6 +85,8 @@ export class ClaudeSource {
   private readonly hub: Hub;
   private readonly clock: Clock;
   private readonly options: ClaudeOptions;
+  private readonly agent: 'claude' | 'codex';
+  private readonly tools: ToolKit;
   private readonly sessions = new Map<string, Session>();
   private nextReq = 1;
   private cancelSweep: () => void;
@@ -90,6 +97,8 @@ export class ClaudeSource {
     this.hub = hub;
     this.clock = clock;
     this.options = options;
+    this.agent = options.agent ?? 'claude';
+    this.tools = options.tools ?? claudeTools;
     this.cancelSweep = this.scheduleSweep();
     this.unsubscribe = hub.subscribe((event) => {
       // The last device left: give every held request back to the terminal.
@@ -165,7 +174,8 @@ export class ClaudeSource {
       const transcript = str(event.transcript_path);
       session = {
         id,
-        tail: transcript ? new TranscriptTail(transcript) : null,
+        // Codex's rollout files are another format, and its events name the model anyway.
+        tail: transcript && this.agent === 'claude' ? new TranscriptTail(transcript) : null,
         lastText: undefined,
         lastEvent: this.now(),
         held: [],
@@ -178,7 +188,8 @@ export class ClaudeSource {
         {
           id,
           name: cwd ? baseName(cwd) : id.slice(0, 8),
-          agent: 'claude',
+          agent: this.agent,
+          branch: cwd ? gitBranch(cwd) : undefined,
           model: '—', // until the transcript or SessionStart says which
           state: 'idle',
           since: now,
@@ -195,7 +206,7 @@ export class ClaudeSource {
           reply: (text) => this.reply(id, text),
         },
       );
-      this.options.log(`claude session ${id.slice(0, 8)} in ${cwd ?? '?'}`);
+      this.options.log(`${this.agent} session ${id.slice(0, 8)} in ${cwd ?? '?'}`);
     }
     session.lastEvent = this.now();
     if (run !== session.token) this.setToken(session, run);
@@ -228,6 +239,7 @@ export class ClaudeSource {
           s.state = 'running';
           s.since = now;
           s.started = now;
+          if (cwd) s.branch = gitBranch(cwd) ?? s.branch;
           s.n = { read: 0, edit: 0, new: 0, cmd: 0, add: 0, del: 0 };
           s.files = [];
           s.hunks = { total: 0, list: [] };
@@ -248,7 +260,7 @@ export class ClaudeSource {
             const todos = todosFrom(input);
             if (todos) s.todos = todos;
           } else {
-            s.now = { verb: verbOf(tool), target: targetOf(tool, input, cwd) };
+            s.now = { verb: this.tools.verbOf(tool), target: this.tools.targetOf(tool, input, cwd) };
           }
         });
         return NO_DECISION;
@@ -261,8 +273,9 @@ export class ClaudeSource {
         return NO_DECISION;
       case 'PostToolUseFailure':
         this.change(id, (s) => {
-          const target = isFileTool(tool) ? baseName(targetOf(tool, input, cwd)) : targetOf(tool, input, cwd);
-          this.log(s, { verb: verbOf(tool), target, res: event.is_interrupt === true ? '中断' : '失败', bad: true });
+          const full = this.tools.targetOf(tool, input, cwd);
+          const target = this.tools.isFileTool(tool) ? baseName(full) : full;
+          this.log(s, { verb: this.tools.verbOf(tool), target, res: event.is_interrupt === true ? '中断' : '失败', bad: true });
         });
         return NO_DECISION;
       case 'Notification':
@@ -305,27 +318,32 @@ export class ClaudeSource {
 
   /** A finished tool call: log it, count it, keep its file changes. */
   private record(s: SessionSnapshot, tool: string, input: Record<string, unknown>, response: unknown, cwd: string | undefined): void {
-    const result = resultOf(tool, input, response, cwd);
-    const target = targetOf(tool, input, cwd);
+    const result = this.tools.resultOf(tool, input, response, cwd);
+    const target = this.tools.targetOf(tool, input, cwd);
     this.log(s, {
-      verb: verbOf(tool),
-      target: isFileTool(tool) ? baseName(target) : target,
+      verb: this.tools.verbOf(tool),
+      target: this.tools.isFileTool(tool) ? baseName(target) : target,
       add: result.add,
       del: result.del,
       res: result.add === undefined ? result.res : undefined,
+      bad: result.bad,
     });
-    const counter = counterOf(tool, result.created);
+    const counter = this.tools.counterOf(tool, result.created);
     if (counter) s.n[counter] += 1;
     s.n.add += result.add ?? 0;
     s.n.del += result.del ?? 0;
-    if (result.add !== undefined && (tool === 'Edit' || tool === 'MultiEdit' || tool === 'Write')) {
-      let file = s.files.find((f) => f.path === target);
+    for (const changed of result.files) {
+      let file = s.files.find((f) => f.path === changed.path);
       if (!file) {
-        file = { st: result.created ? 'A' : 'M', path: target, add: 0, del: 0 };
+        file = { ...changed, add: 0, del: 0 };
         s.files.unshift(file);
+      } else if (changed.st === 'D') {
+        file.st = 'D';
       }
-      file.add += result.add;
-      file.del += result.del ?? 0;
+      file.add += changed.add;
+      file.del += changed.del;
+    }
+    if (result.hunks.length > 0) {
       s.hunks.total += result.hunks.length;
       s.hunks.list = [...result.hunks, ...s.hunks.list].slice(0, LIMITS.hunks);
     }
@@ -404,7 +422,7 @@ export class ClaudeSource {
 
   private holdPermission(session: Session, tool: string, input: Record<string, unknown>, cwd: string | undefined): Promise<PostReply> {
     if (this.hub.devices() === 0) return Promise.resolve(NO_DECISION);
-    const body = askOf(tool, input, cwd);
+    const body = this.tools.askOf(tool, input, cwd);
     const snapshot = this.hub.get(session.id);
     if (!body.why && snapshot?.say) body.why = snapshot.say;
     const req = `r${this.nextReq++}`;
@@ -462,7 +480,7 @@ export class ClaudeSource {
       },
     });
     this.change(id, (s) => {
-      if (!allow) this.log(s, { verb: verbOf(head.tool), target: head.target, res: '已拒绝', bad: true });
+      if (!allow) this.log(s, { verb: this.tools.verbOf(head.tool), target: head.target, res: '已拒绝', bad: true });
     });
     this.advance(session);
   }
