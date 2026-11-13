@@ -26,7 +26,7 @@ lines.on('line', async (line) => {
   if (text === 'ask') {
     // A permission prompt like Codex's, answered by a key; it goes from the screen once answered.
     asking = true;
-    process.stdout.write('Would you like to run the following command?\n  1. Yes, proceed (y)\nready> ');
+    process.stdout.write('Would you like to run the following command?\n  $ npm test\n  1. Yes, proceed (y)\nready> ');
     return;
   }
   if (asking) {
@@ -35,4 +35,6 @@ lines.on('line', async (line) => {
   }
   await hook('UserPromptSubmit', { prompt: text });
   process.stdout.write(`got: ${text}\nready> `);
+  // That was the whole turn.
+  await hook('Stop', { last_assistant_message: `done: ${text}` });
 });

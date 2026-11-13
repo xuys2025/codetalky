@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -80,7 +81,9 @@ test('a managed run: the device types into the agent running in its terminal', {
     hub.act({ t: 'reply', seq: 3, id: session.id, text: '等会儿再说' });
     await new Promise((r) => setTimeout(r, 1200));
     assert.equal(screen.includes('got: 等会儿再说'), false);
-    assert.equal(await runs.press(token, 'y\r', 'Yes, proceed'), true);
+    // A prompt is up, but for another command than the one the device answered: nothing is pressed.
+    assert.equal(await runs.press(token, 'y\r', 'Yes, proceed', 'rm -rf build'), false);
+    assert.equal(await runs.press(token, 'y\r', 'Yes, proceed', 'npm test'), true);
     await until('the key to arrive', () => screen.includes('got: y'));
     await until('the waiting instruction, once the prompt is gone', () => screen.includes('got: 等会儿再说'));
 
@@ -122,6 +125,37 @@ test('a hook that hangs up is noticed, so its held request can go', async () => 
     caller.abort();
     await call;
     await until('the server to notice', () => hungUp, 3000);
+  } finally {
+    await server.close();
+  }
+});
+
+test('a request the server cannot read is refused, and the server stays up', async () => {
+  const hub = new Hub(realClock);
+  const server = await startServer(hub, realClock, {
+    host: '127.0.0.1',
+    port: 0,
+    simDir: null,
+    hostName: '测试机',
+    hostId: 'test',
+    quick: [],
+    tzMinutes: 0,
+    flushMs: 50,
+    log: () => {},
+  });
+  try {
+    const raw = (request: string) =>
+      new Promise<string>((resolve) => {
+        const socket = connect(server.port, '127.0.0.1', () => socket.end(request));
+        let got = '';
+        socket.on('data', (d) => (got += d.toString()));
+        socket.on('close', () => resolve(got));
+        socket.on('error', () => resolve(got));
+      });
+    assert.match(await raw('GET //[ HTTP/1.1\r\nHost: x\r\n\r\n'), /^HTTP\/1\.1 400/);
+    assert.match(await raw('GET //[ HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n'), /^HTTP\/1\.1 400/);
+    const res = await fetch(`http://127.0.0.1:${server.port}/`);
+    assert.equal(res.status, 404, 'still answering');
   } finally {
     await server.close();
   }

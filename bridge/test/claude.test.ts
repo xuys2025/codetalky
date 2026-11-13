@@ -124,6 +124,22 @@ test('answered in the terminal: the tool result also clears the prompt', async (
   assert.equal(get().ask, undefined);
 });
 
+test('another call of the same tool finishing does not let go of a held one', async () => {
+  const { send, get } = setup();
+  const a = send('PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'rm -rf build' }, tool_use_id: 'tu-a' });
+  await settled(a);
+  assert.equal(get().state, 'approve');
+  // B ran alongside without asking, and finished.
+  await send('PostToolUse', { tool_name: 'Bash', tool_input: { command: 'ls' }, tool_use_id: 'tu-b', tool_response: { stdout: '' } });
+  await send('PostToolUse', { tool_name: 'Bash', tool_input: { command: 'rm -rf build' }, tool_use_id: 'tu-c', tool_response: { stdout: '' } });
+  assert.equal(await settled(a), 'pending', 'not by name, nor by the same command under another id');
+  assert.equal(get().state, 'approve');
+  // A itself finished (answered in the terminal): now it goes.
+  await send('PostToolUse', { tool_name: 'Bash', tool_input: { command: 'rm -rf build' }, tool_use_id: 'tu-a', tool_response: { stdout: '' } });
+  assert.deepEqual(await a, { status: 200 });
+  assert.equal(get().state, 'running');
+});
+
 test('the device leaving hands every held request back to the terminal', async () => {
   const { detach, send, get } = setup();
   const reply = send('PermissionRequest', edit);

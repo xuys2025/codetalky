@@ -55,6 +55,11 @@ typedef enum {
 } reply_mode_t;
 static reply_mode_t s_reply_mode = REPLY_SAY;
 static uint32_t s_picked; /* multi-select question: options picked so far, one bit each */
+static struct {
+    int link;
+    char id[CT_ID_MAX];
+    char req[CT_REQ_MAX];
+} s_picked_for = {.link = -1}; /* the question s_picked is for */
 
 /* Pairing: the screen shows the code of one computer that asked. A code is good for
  * five minutes on the computer; a fresh one is requested a little before that. */
@@ -1344,8 +1349,13 @@ static void show_question(void) {
         return;
     }
     const ct_ask_t *ask = &s->ask;
-    if (strcmp(s_req, req_of(s)) != 0) {
-        s_picked = 0; /* a new question */
+    /* Ticks belong to one question of one session on one computer (two computers can
+     * both have a request "r1"): anything else starts with none. */
+    if (s_picked_for.link != s->link || strcmp(s_picked_for.id, s->id) != 0 || strcmp(s_picked_for.req, req_of(s)) != 0) {
+        s_picked = 0;
+        s_picked_for.link = s->link;
+        snprintf(s_picked_for.id, sizeof(s_picked_for.id), "%s", s->id);
+        snprintf(s_picked_for.req, sizeof(s_picked_for.req), "%s", req_of(s));
     }
     snprintf(s_req, sizeof(s_req), "%s", req_of(s));
 
@@ -1712,7 +1722,7 @@ static void show_reply(void) {
     } else if (s_reply_mode == REPLY_PLAN) {
         note = "计划会打回给它，按这句话改";
     } else if (s->state == CT_STATE_RUNNING) {
-        note = "它正在干活，这句话会排在当前这一步之后";
+        note = "它正在干活，这句话等它做完这一轮再发";
     }
     ct_label(hint, F18, note);
     present(screen, SCR_REPLY);
@@ -1760,7 +1770,7 @@ static void show_voice(void) {
     }
 
     ct_section(content, "发出去之后");
-    const char *after = s->state == CT_STATE_RUNNING ? "这句话排在它当前这一步后面，不会打断正在进行的修改。" : "它会马上开始按这句话去做。";
+    const char *after = s->state == CT_STATE_RUNNING ? "它正在干活：这句话等它做完这一轮再发过去，不会打断它。" : "它会马上开始按这句话去做。";
     if (s_reply_mode == REPLY_ANSWER) {
         after = "作为这道题的回答发给它，它接着往下做。";
     } else if (s_reply_mode == REPLY_PLAN) {

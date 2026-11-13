@@ -26,6 +26,19 @@ const ENTER_DELAY_MS = 150;
 export const PROMPT_UP = /No, and tell \w+ what to do differently|Yes, proceed|Press enter to confirm/i;
 const PROMPT_POLL_MS = 400;
 
+/**
+ * The screen shows the agent's prompt (expect) for this very request (needle: its
+ * command or file). Whitespace is ignored because the terminal wraps long lines. A
+ * prompt for another request, or the words alone in some output, doesn't count.
+ */
+export function promptShows(screen: string, expect: RegExp, needle: string | undefined): boolean {
+  if (!expect.test(screen)) return false;
+  if (needle === undefined) return true;
+  const squash = (s: string) => s.replace(/\s+/g, '');
+  const want = squash(needle);
+  return want !== '' && squash(screen).includes(want);
+}
+
 /** Find a command on PATH. npm's .cmd shims on Windows are followed to the program they start. */
 export function resolveCommand(name: string, env: NodeJS.ProcessEnv = process.env): { file: string; prefix: string[] } {
   if (process.platform !== 'win32') return { file: name, prefix: [] };
@@ -115,26 +128,32 @@ export function runManaged(o: RunOptions): Promise<number> {
         ready(lines.join('\n'));
       }),
     );
-  const press = async (keys: string, expect: string): Promise<boolean> => {
+  const press = async (keys: string, expect: string, needle: string | undefined): Promise<boolean> => {
     let pattern: RegExp;
     try {
       pattern = new RegExp(expect, 'i');
     } catch {
       return false;
     }
-    if (!pattern.test(await screenText())) return false;
+    if (!promptShows(await screenText(), pattern, needle)) return false;
     term.write(keys);
     return true;
   };
-  // Instructions are typed one after another, each once no prompt is up.
+  /** Wait until no prompt is up. False if the agent exited. */
+  const promptGone = async (): Promise<boolean> => {
+    while (!done && PROMPT_UP.test(await screenText())) await new Promise((r) => setTimeout(r, PROMPT_POLL_MS));
+    return !done;
+  };
+  // Instructions are typed one after another, each once no prompt is up. The bridge only
+  // sends one while the agent isn't working, so a prompt shouldn't come up meanwhile;
+  // if one does before the Enter, that Enter would answer it: wait until it's gone.
   let typing: Promise<void> = Promise.resolve();
   const typeLine = (keys: string) => {
     typing = typing.then(async () => {
-      while (!done && PROMPT_UP.test(await screenText())) await new Promise((r) => setTimeout(r, PROMPT_POLL_MS));
-      if (done) return;
+      if (!(await promptGone())) return;
       term.write(keys);
       await new Promise((r) => setTimeout(r, ENTER_DELAY_MS));
-      if (!done) term.write('\r');
+      if (await promptGone()) term.write('\r');
     });
   };
 
@@ -154,7 +173,7 @@ export function runManaged(o: RunOptions): Promise<number> {
         return;
       }
       if (msg.t === 'press' && typeof msg.keys === 'string' && typeof msg.expect === 'string') {
-        void press(msg.keys, msg.expect).then((ok) => {
+        void press(msg.keys, msg.expect, typeof msg.needle === 'string' ? msg.needle : undefined).then((ok) => {
           if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: 'pressed', id: msg.id, ok } satisfies FromRun));
         });
         return;

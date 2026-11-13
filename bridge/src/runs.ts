@@ -13,8 +13,12 @@ export type FromRun =
   | { t: 'pressed'; id: number; ok: boolean };
 export type ToRun =
   | { t: 'type'; text: string }
-  /** Press keys, but only if the screen matches expect (a case-insensitive regular expression). */
-  | { t: 'press'; id: number; keys: string; expect: string };
+  /**
+   * Press keys, but only if the screen matches expect (a case-insensitive regular
+   * expression: the agent's prompt is up) and shows needle (what this particular
+   * request is about, compared without whitespace since the terminal wraps it).
+   */
+  | { t: 'press'; id: number; keys: string; expect: string; needle?: string };
 
 /** How long to wait for a launcher to say whether it pressed. */
 const PRESS_TIMEOUT_MS = 3000;
@@ -59,8 +63,8 @@ export class Runs {
     return true;
   }
 
-  /** Press keys in a run's terminal if its screen matches expect. Resolves with whether it did. */
-  press(run: string, keys: string, expect: string): Promise<boolean> {
+  /** Press keys in a run's terminal if its screen shows the prompt and needle. Resolves with whether it did. */
+  press(run: string, keys: string, expect: string, needle?: string): Promise<boolean> {
     const r = this.runs.get(run);
     if (!r) return Promise.resolve(false);
     const id = this.nextPress++;
@@ -72,7 +76,7 @@ export class Runs {
         resolve(ok);
       };
       r.presses.set(id, done);
-      r.send({ t: 'press', id, keys, expect });
+      r.send({ t: 'press', id, keys, expect, ...(needle ? { needle } : {}) });
     });
   }
 

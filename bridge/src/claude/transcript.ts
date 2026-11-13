@@ -2,6 +2,7 @@
 // the model, the git branch, the latest assistant text and the todo list.
 
 import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
+import { StringDecoder } from 'node:string_decoder';
 
 export interface TranscriptState {
   model?: string;
@@ -36,17 +37,30 @@ export function todosFrom(input: unknown): TranscriptState['todos'] | undefined 
 
 const rank = (status: unknown) => (status === 'completed' ? 0 : status === 'in_progress' ? 1 : 2);
 
+/** A line longer than this is dropped rather than kept growing in memory. */
+const MAX_LINE = 8 * 1024 * 1024;
+/** How much of what was read last is kept to notice a file rewritten in place. */
+const SEEN_BYTES = 64;
+
 /** Reads a JSONL file incrementally: each update() hands over the lines appended since the last one. */
 export abstract class JsonlTail {
   readonly path: string;
   private offset = -1;
   private partial = '';
+  /** Keeps a character split between two reads whole. */
+  private decoder = new StringDecoder('utf8');
+  /** Which file this is (a new one under the same name starts over). */
+  private identity = '';
+  /** Inside a line too long to keep: skip to its end. */
+  private skipping = false;
+  /** The last bytes read, ending at offset: if they changed, the file was rewritten in place. */
+  private seen = Buffer.alloc(0);
 
   constructor(path: string) {
     this.path = path;
   }
 
-  /** Read whatever was appended since last time. Never throws. */
+  /** Read what was appended since last time, at most FIRST_READ_MAX at once. Never throws. */
   protected read(): void {
     let fd: number;
     try {
@@ -55,15 +69,36 @@ export abstract class JsonlTail {
       return;
     }
     try {
-      const size = fstatSync(fd).size;
-      if (this.offset < 0) this.offset = Math.max(0, size - FIRST_READ_MAX);
-      if (size < this.offset) this.offset = 0; // rewritten
+      const stat = fstatSync(fd);
+      const size = stat.size;
+      const identity = `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
+      if (this.offset < 0) {
+        this.offset = Math.max(0, size - FIRST_READ_MAX);
+        this.skipping = this.offset > 0; // started mid-file: the first line is a fragment
+      } else if (size < this.offset || identity !== this.identity || !this.unchanged(fd)) {
+        // Rewritten or replaced: start over, with nothing left of the old file.
+        this.offset = 0;
+        this.partial = '';
+        this.decoder = new StringDecoder('utf8');
+        this.skipping = false;
+        this.seen = Buffer.alloc(0);
+      }
+      this.identity = identity;
       if (size === this.offset) return;
-      const buf = Buffer.alloc(size - this.offset);
-      readSync(fd, buf, 0, buf.length, this.offset);
-      this.offset = size;
-      const lines = (this.partial + buf.toString('utf8')).split('\n');
+      const buf = Buffer.alloc(Math.min(size - this.offset, FIRST_READ_MAX));
+      const got = readSync(fd, buf, 0, buf.length, this.offset);
+      this.offset += got;
+      this.seen = Buffer.from(Buffer.concat([this.seen, buf.subarray(0, got)]).subarray(-SEEN_BYTES));
+      const lines = (this.partial + this.decoder.write(buf.subarray(0, got))).split('\n');
       this.partial = lines.pop() ?? '';
+      if (this.skipping && lines.length > 0) {
+        lines.shift();
+        this.skipping = false;
+      }
+      if (this.partial.length > MAX_LINE) {
+        this.partial = '';
+        this.skipping = true;
+      }
       for (const line of lines) {
         if (!line.trim()) continue;
         let entry: Record<string, unknown>;
@@ -79,6 +114,14 @@ export abstract class JsonlTail {
     } finally {
       closeSync(fd);
     }
+  }
+
+  /** The bytes before offset are still the ones read last time. */
+  private unchanged(fd: number): boolean {
+    if (this.seen.length === 0) return true;
+    const now = Buffer.alloc(this.seen.length);
+    const got = readSync(fd, now, 0, now.length, this.offset - this.seen.length);
+    return got === now.length && now.equals(this.seen);
   }
 
   protected abstract take(entry: Record<string, unknown>): void;

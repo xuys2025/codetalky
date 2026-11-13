@@ -31,17 +31,21 @@ function commandOf(input: Input): string {
 const patchOf = (input: Input): PatchFile[] => parsePatch(str(input.command) ?? str(input.input) ?? str(input.patch) ?? '');
 
 /**
- * Codex runs apply_patch through the shell too (`apply_patch <<'PATCH' ... PATCH`), and
- * its PreToolUse then says Bash. Show those as the patch they are.
+ * Exactly `apply_patch <<'TAG'` + a patch + `TAG`, nothing before or after. Anything
+ * else (a cd in front, a second command behind, an unquoted tag the shell would
+ * expand) is a shell command and shown as one, so the device never hides what would run.
+ */
+const PATCH_HEREDOC = /^apply_patch <<'([A-Z_]+)'\n(\*\*\* Begin Patch\n[\s\S]*\n\*\*\* End Patch)\n\1\n?$/;
+
+/**
+ * Codex runs apply_patch through the shell too, and its PreToolUse then says Bash.
+ * Show such a call as the patch it is, but only if that is all it is.
  */
 function normalize(tool: string, input: Input): { tool: string; input: Input } {
-  if (!isShell(tool)) return { tool, input };
-  const command = commandOf(input);
-  if (!/^\s*(?:cd\s+(?:"[^"]+"|'[^']+'|\S+)\s*(?:&&|;)\s*)?apply_patch\b/.test(command)) return { tool, input };
-  const begin = command.indexOf('*** Begin Patch');
-  const end = command.lastIndexOf('*** End Patch');
-  if (begin < 0 || end < begin) return { tool, input };
-  return { tool: 'apply_patch', input: { command: command.slice(begin, end + '*** End Patch'.length) } };
+  if (!isShell(tool) || typeof input.command !== 'string') return { tool, input };
+  const m = PATCH_HEREDOC.exec(input.command);
+  if (!m || m[2]!.includes(`\n${m[1]}\n`)) return { tool, input };
+  return { tool: 'apply_patch', input: { command: m[2] } };
 }
 
 /** A completed apply_patch from Codex's session file, as the device logs it. */

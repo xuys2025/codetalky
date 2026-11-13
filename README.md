@@ -61,7 +61,7 @@ node src/main.ts            # 起服务；加 --fake 可以同时看演示会话
 
 之后在任何终端里开的 Claude Code 会话都会出现在设备上，批准请求和它的提问可以在设备上回答。终端里的确认框也照常弹出，在哪边答都行，另一边自动收起；设备没连上或期限内没回话时，就只在终端里答。不用了就 `node src/main.ts hooks --remove ~/.claude/settings.json`。细节见 `docs/STATUS.md` 的“第 7 项”。
 
-想从设备给 Claude 发新指令，用 `codetalky claude` 代替 `claude` 启动（参数照旧）。在 `bridge` 目录运行一次 `npm link`，之后任何终端里都有 `codetalky` 命令；不想装就用 `node <仓库>/bridge/src/main.ts claude`。它在终端里看起来和直接运行 `claude` 一样，一启动设备上就有这个会话，设备发来的指令会像键盘输入一样打进去。终端里正弹着确认框时，指令先等着，确认框答完再打进去（不然它的回车会替你答了确认框）。
+想从设备给 Claude 发新指令，用 `codetalky claude` 代替 `claude` 启动（参数照旧）。在 `bridge` 目录运行一次 `npm link`，之后任何终端里都有 `codetalky` 命令；不想装就用 `node <仓库>/bridge/src/main.ts claude`。它在终端里看起来和直接运行 `claude` 一样，一启动设备上就有这个会话，设备发来的指令会像键盘输入一样打进去。它正在干活时，设备发来的指令先存着，等这一轮做完再打进去（干活中途它随时可能弹确认框，指令末尾的回车会替你答掉）。
 
 Codex 也一样，只是它的钩子只能是命令，并且新钩子要先在 Codex 里信任一次：
 
@@ -80,7 +80,7 @@ codetalky codex  # 想从设备发指令时用它代替 codex 启动
 
 有几台电脑跑 agent，就在每台上都开电脑端服务，用 `--name` 起个名字（比如 `--name 台式机`），设备会同时连上所有电脑。
 
-真机要从局域网连电脑，服务得监听局域网地址：`node src/main.ts --host 0.0.0.0 --name 台式机`。设备第一次连这台电脑时屏幕上会显示一个 6 位配对码，在这台电脑上运行 `codetalky pair <配对码>` 确认就行，以后自动认得。`codetalky devices` 看已配对的设备，`codetalky unpair <名字>` 撤销。
+真机要从局域网连电脑，服务得监听局域网地址：`node src/main.ts --host 0.0.0.0 --name 台式机`。设备第一次连这台电脑时会提示配对：在这台电脑上运行 `codetalky pair`，设备屏幕上会出现 6 位配对码，按提示输入它，再在设备上点“配好了”，以后自动认得，连接全程加密。`codetalky devices` 看已配对的设备，`codetalky unpair <名字>` 撤销。
 
 ## 现状
 

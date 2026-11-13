@@ -105,8 +105,12 @@ interface Held {
   index?: number;
   answers?: Record<string, string>;
   input: Record<string, unknown>;
+  /** The agent's id for the tool call, when its hook says. */
+  toolUseId?: string;
   /** Not held: the agent's own prompt is up in the terminal, and the device answers it with keys. */
   viaKeys?: boolean;
+  /** A key press for it is on its way to the terminal. */
+  pressing?: boolean;
   finish: (reply: PostReply) => void;
   cancelTimer: () => void;
 }
@@ -131,9 +135,24 @@ interface Session {
    * an instruction; the next session from the same run takes over this entry.
    */
   waiting: boolean;
+  /** Instructions from the device that wait for the agent to finish its turn. */
+  queued: string[];
 }
 
 const emptyCounts = () => ({ read: 0, edit: 0, new: 0, cmd: 0, add: 0, del: 0 });
+
+/** In the middle of a turn: it may put up a prompt at any moment. */
+const isBusy = (state: string | undefined) => state === 'running' || state === 'approve' || state === 'question';
+
+/**
+ * What the agent's terminal prompt for this request shows that another request's
+ * wouldn't: the command (its start, as long ones get cut), or the first file's name.
+ */
+function needleOf(held: Pick<Held, 'tool' | 'target'>): string {
+  const target = held.target.replace(/ 等 \d+ 个文件$/, '');
+  const shown = /^(apply_patch|Edit|Write)$/.test(held.tool) ? baseName(target) : target;
+  return shown.slice(0, 60);
+}
 
 export class ClaudeSource {
   private readonly hub: Hub;
@@ -166,6 +185,11 @@ export class ClaudeSource {
       // An ended session's report has been seen: it can go now.
       if (event.type === 'changed' && this.sessions.get(event.id)?.ended && hub.get(event.id)?.state === 'idle') {
         this.forget(event.id);
+      }
+      // A turn is over: an instruction that waited for it can go now.
+      if (event.type === 'changed') {
+        const session = this.sessions.get(event.id);
+        if (session && session.queued.length > 0) this.sendQueued(session);
       }
     });
     this.unsubscribeRuns = options.runs?.subscribe((event) => this.onRun(event)) ?? (() => {});
@@ -211,6 +235,7 @@ export class ClaudeSource {
       ended: false,
       token: run,
       waiting: true,
+      queued: [],
     };
     this.sessions.set(id, session);
     this.put(id, cwd || undefined, true);
@@ -282,10 +307,30 @@ export class ClaudeSource {
     }
   }
 
+  /**
+   * An instruction from the device, typed into the agent's terminal. While the agent is
+   * working it waits here until the turn is over: mid-turn the agent may put up a
+   * prompt at any moment, and the instruction's Enter would answer it.
+   */
   private reply(id: string, text: string): void {
-    const token = this.sessions.get(id)?.token;
-    // Claude Code reports the prompt through UserPromptSubmit, which logs it.
-    if (token) this.options.runs?.type(token, text);
+    const session = this.sessions.get(id);
+    if (!session?.token) return;
+    if (isBusy(this.hub.get(id)?.state)) {
+      session.queued.push(text);
+      this.change(id, (s) => {
+        s.say = `它做完这一轮再发给它：${firstLine(text, 40)}`;
+      });
+      return;
+    }
+    // The agent reports the prompt through UserPromptSubmit, which logs it.
+    this.options.runs?.type(session.token, text);
+  }
+
+  /** The agent finished a turn: send the next instruction that waited for it. */
+  private sendQueued(session: Session): void {
+    if (session.queued.length === 0 || !session.token || !this.options.runs?.has(session.token)) return;
+    if (isBusy(this.hub.get(session.id)?.state)) return;
+    this.options.runs.type(session.token, session.queued.shift()!);
   }
 
   private now(): number {
@@ -332,6 +377,7 @@ export class ClaudeSource {
         ended: false,
         token: null,
         waiting: false,
+        queued: [],
       };
       this.sessions.set(id, session);
       this.put(id, cwd, false); // replies stay off until a managed run claims it
@@ -431,9 +477,9 @@ export class ClaudeSource {
       case 'PermissionRequest':
         if (tool === 'ExitPlanMode') return this.holdPlan(session, input, gone);
         if (tool === 'AskUserQuestion') return NO_DECISION;
-        return this.holdPermission(session, tool, input, cwd, gone);
+        return this.holdPermission(session, tool, input, cwd, gone, str(event.tool_use_id));
       case 'PostToolUse':
-        this.settled(session, tool, input);
+        this.settled(session, tool, input, str(event.tool_use_id), cwd);
         this.change(id, (s) => {
           if (s.say === WAITING_THERE) delete s.say;
           if (tool === 'TodoWrite' || tool === 'AskUserQuestion') return;
@@ -443,7 +489,7 @@ export class ClaudeSource {
         });
         return NO_DECISION;
       case 'PostToolUseFailure':
-        this.settled(session, tool, input);
+        this.settled(session, tool, input, str(event.tool_use_id), cwd);
         this.change(id, (s) => {
           if (s.say === WAITING_THERE) delete s.say;
           const full = this.tools.targetOf(tool, input, cwd);
@@ -572,9 +618,16 @@ export class ClaudeSource {
    * it in the terminal. Agents show their own prompt while the hook waits, so this is
    * normal; it backs up `gone` for agents that don't hang up on the hook.
    */
-  private settled(session: Session, tool: string, input: Record<string, unknown>): void {
+  private settled(session: Session, tool: string, input: Record<string, unknown>, toolUseId: string | undefined, cwd: string | undefined): void {
+    // Only the very same call: with calls running side by side, another one of the same
+    // tool finishing says nothing about this one. Its id if both sides have one, else
+    // the same input, else the same thing to act on (Codex adds a description to the request).
     const same = JSON.stringify(input);
-    const held = session.held.find((h) => h.tool === tool && JSON.stringify(h.input) === same) ?? session.held.find((h) => h.tool === tool);
+    const target = this.tools.targetOf(tool, input, cwd);
+    const held =
+      session.held.find((h) => toolUseId !== undefined && h.toolUseId === toolUseId) ??
+      session.held.find((h) => h.tool === tool && (h.toolUseId === undefined || toolUseId === undefined) && JSON.stringify(h.input) === same) ??
+      session.held.find((h) => h.tool === tool && (h.toolUseId === undefined || toolUseId === undefined) && target !== '' && this.tools.targetOf(h.tool, h.input, cwd) === target);
     if (held) this.release(session, held, ANSWERED_THERE);
   }
 
@@ -644,6 +697,7 @@ export class ClaudeSource {
     input: Record<string, unknown>,
     cwd: string | undefined,
     gone?: AbortSignal,
+    toolUseId?: string,
   ): Promise<PostReply> {
     const managed = session.token !== null && (this.options.runs?.has(session.token) ?? false);
     if (this.options.terminalKeys && !managed) {
@@ -662,7 +716,7 @@ export class ClaudeSource {
     const snapshot = this.hub.get(session.id);
     if (!body.why && snapshot?.say) body.why = snapshot.say;
     const req = `r${this.nextReq++}`;
-    const held = { req, ask: { kind: 'approve', req, ...body } as ApproveAsk, tool, target: body.target, input };
+    const held = { req, ask: { kind: 'approve', req, ...body } as ApproveAsk, tool, target: body.target, input, toolUseId };
     if (this.options.terminalKeys) {
       // The agent would not draw its own prompt while this hook waits. Let it draw it
       // now; the device answers it by pressing keys in the terminal.
@@ -753,19 +807,27 @@ export class ClaudeSource {
       return;
     }
     if (head.viaKeys) {
+      // The answer is a key pressed in the terminal, and only on this request's own
+      // prompt: it counts once the launcher has pressed it, not before.
+      if (head.pressing) return;
+      head.pressing = true;
       const keys = this.options.terminalKeys!;
       const token = session.token;
-      head.finish(NO_DECISION);
-      this.change(id, (s) => {
-        if (!allow) this.log(s, { verb: this.tools.verbOf(head.tool), target: head.target, res: '已拒绝', bad: true });
-      });
-      this.advance(session);
-      const pressed = token ? this.options.runs!.press(token, allow ? keys.allow : keys.deny, keys.expect) : Promise.resolve(false);
+      const pressed = token ? this.options.runs!.press(token, allow ? keys.allow : keys.deny, keys.expect, needleOf(head)) : Promise.resolve(false);
       void pressed.then((ok) => {
+        if (!session.held.includes(head)) return; // answered at the computer meanwhile
+        if (!ok) {
+          this.release(session, head, '终端里没找到这个确认框，回电脑确认');
+          return;
+        }
+        head.finish(NO_DECISION);
         this.change(id, (s) => {
-          if (!ok) {
-            s.say = '终端里已经没有这个确认框了，没有按';
-          } else if (!allow && (s.state === 'running' || s.state === 'idle') && session.held.length === 0) {
+          if (!allow) this.log(s, { verb: this.tools.verbOf(head.tool), target: head.target, res: '已拒绝', bad: true });
+        });
+        this.advance(session);
+        if (allow) return;
+        this.change(id, (s) => {
+          if ((s.state === 'running' || s.state === 'idle') && session.held.length === 0) {
             // Saying no to its prompt stops the turn; it waits for the next instruction (and fires no Stop).
             s.state = 'idle';
             s.since = this.now();
