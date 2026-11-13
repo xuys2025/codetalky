@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { ManualClock } from '../src/clock.ts';
 import { Hub } from '../src/hub.ts';
 import { DeviceLink } from '../src/link.ts';
-import { Pairing } from '../src/pairing.ts';
+import { MAX_PENDING, Pairing } from '../src/pairing.ts';
 import { parseFromDevice, type SessionSnapshot } from '../src/protocol.ts';
 import {
   Channel,
@@ -62,6 +62,30 @@ test('pairing requests expire after five minutes, and old token pairings are dro
   assert.equal(pairing.approve('111111'), null);
   writeFileSync(file, JSON.stringify({ devices: [{ id: DEVICE, name: 'd', hash: 'a'.repeat(64), pairedAt: 1 }] }));
   assert.equal(new Pairing(file, clock, () => {}).keyOf(DEVICE), null);
+});
+
+test('only a few requests wait at once, and a code two of them share pairs neither', () => {
+  const { pairing } = setup();
+  // Someone parking many requests would likely hold whatever code the user types.
+  for (let i = 0; i < MAX_PENDING; i++) assert.ok(pairing.request(`d${i}`.padEnd(16, '0'), 'x', `00000${i}`, KEY, () => {}));
+  assert.equal(pairing.request('e'.repeat(16), 'x', '123456', KEY, () => {}), null);
+  assert.equal(pairing.pending().length, MAX_PENDING);
+
+  const { pairing: other } = setup();
+  let granted = 0;
+  other.request('a'.repeat(16), '真设备', '482159', KEY, () => granted++);
+  other.request('b'.repeat(16), '冒充的', '482159', KEY, () => granted++);
+  assert.equal(other.approve('482159'), null);
+  assert.equal(granted, 0);
+});
+
+test('a device asking to pair while the computer is full is turned away before it sees a code', () => {
+  const { clock, pairing } = setup();
+  for (let i = 0; i < MAX_PENDING; i++) pairing.request(`d${i}`.padEnd(16, '0'), 'x', `00000${i}`, KEY, () => {});
+  const d = new FakeDevice(new Hub(clock), clock, pairing);
+  assert.equal(d.hello(), true);
+  assert.deepEqual(d.kinds(), ['auth'], 'no reveal, so no code');
+  assert.equal(d.code, '');
 });
 
 test('the device messages for auth and pairing are checked', () => {

@@ -15,11 +15,12 @@
 #define CT_DEVICE_NAME "codetalky"
 #endif
 
-/* 1: every computer must prove it holds the pairing key and talk encrypted (the real
- * device, which only ever connects over the network). 0: a computer may also greet
- * in plain text (the simulator, whose bridge trusts connections from its own machine). */
+/* 1 (the default, and what the real device uses: it only ever connects over the
+ * network): every computer must be paired and talk encrypted. 0: a computer may also
+ * greet in plain text; only the simulator builds with this, because its bridge
+ * trusts connections from its own machine. */
 #ifndef CT_REQUIRE_SECURE
-#define CT_REQUIRE_SECURE 0
+#define CT_REQUIRE_SECURE 1
 #endif
 
 /* What the device keeps of a snapshot; the bridge already trims to these. */

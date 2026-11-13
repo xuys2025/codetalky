@@ -110,7 +110,7 @@ export class DeviceLink {
     if (msg.t === 'auth' || msg.t === 'pair') {
       if (this.authed || !this.options.pairing || !this.challenge) return true;
       if (msg.t === 'auth') this.checkProof(msg.nonce, msg.proof);
-      else this.startPairing(msg.pub, msg.r);
+      else return this.startPairing(msg.pub, msg.r);
       return true;
     }
     if (!this.authed) return true; // actions only count once it has proven who it is
@@ -161,23 +161,28 @@ export class DeviceLink {
     this.sync();
   }
 
-  private startPairing(pubHex: string, rHex: string): void {
+  /** Returns false to drop the connection (too many requests are already waiting). */
+  private startPairing(pubHex: string, rHex: string): boolean {
     const c = this.challenge!;
     const devicePub = fromHex(pubHex, 32);
     const deviceR = fromHex(rHex, 16);
     const shared = devicePub ? sharedSecret(c.keys.secret, devicePub) : null;
     // One pairing attempt per exchange: the device asks for a new one with hello.
-    if (c.spent || !devicePub || !deviceR || !shared) return;
+    if (c.spent || !devicePub || !deviceR || !shared) return true;
     c.spent = true;
     const code = pairCode(devicePub, c.keys.pub, deviceR, c.r);
     const key = pairKey(shared, devicePub, c.keys.pub, deviceR, c.r);
-    this.send({ t: 'pairing', r: c.r.toString('hex') });
-    this.cancelPair = this.options.pairing!.request(this.deviceId!, this.device!, code, key, () => {
+    const cancel = this.options.pairing!.request(this.deviceId!, this.device!, code, key, () => {
       this.cancelPair = null;
       this.secure(key, deviceR);
       this.send({ t: 'paired' });
       this.sync();
     });
+    if (!cancel) return false;
+    this.cancelPair = cancel;
+    // Only now the value it committed to: the device can work out the code.
+    this.send({ t: 'pairing', r: c.r.toString('hex') });
+    return true;
   }
 
   /** From here on every frame is encrypted with this connection's keys. */

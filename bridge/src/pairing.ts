@@ -11,6 +11,12 @@ import type { Clock } from './clock.ts';
 
 /** A pairing request waits this long for the user. */
 const REQUEST_TTL_MS = 5 * 60 * 1000;
+/**
+ * At most this many requests wait at once. Codes have six digits: someone on the
+ * network who could park thousands of requests would likely hold one with whatever
+ * code the user types. Beyond this, new requests are refused until old ones go.
+ */
+export const MAX_PENDING = 3;
 
 export interface PairedDevice {
   id: string;
@@ -54,8 +60,12 @@ export class Pairing {
    * A device asks to pair. code is what both sides computed; key is what this
    * computer will keep if the user approves, and grant() is called then. Returns cancel.
    */
-  request(deviceId: string, name: string, code: string, key: Buffer, grant: () => void): () => void {
+  request(deviceId: string, name: string, code: string, key: Buffer, grant: () => void): (() => void) | null {
     this.drop(deviceId);
+    if (this.requests.length >= MAX_PENDING) {
+      this.log(`refused a pairing request from "${name}": ${MAX_PENDING} are already waiting (see codetalky pair)`);
+      return null;
+    }
     const req: Request = { deviceId, name, code, key, since: this.clock.now(), grant, cancelExpiry: () => {} };
     req.cancelExpiry = this.clock.after(REQUEST_TTL_MS, () => this.drop(deviceId));
     this.requests.push(req);
@@ -70,8 +80,10 @@ export class Pairing {
 
   /** The user typed the code the device shows. */
   approve(code: string): { deviceId: string; name: string } | null {
-    const req = this.requests.find((r) => r.code === code);
-    if (!req) return null;
+    const matching = this.requests.filter((r) => r.code === code);
+    // Two requests with the same code: one of them is not the user's device. Pair neither.
+    if (matching.length !== 1) return null;
+    const req = matching[0]!;
     this.drop(req.deviceId, req);
     this.devices = this.devices.filter((d) => d.id !== req.deviceId);
     this.devices.push({ id: req.deviceId, name: req.name, key: req.key.toString('hex'), pairedAt: Math.floor(this.clock.now() / 1000) });
