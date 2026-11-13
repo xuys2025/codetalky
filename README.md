@@ -16,7 +16,15 @@
 
 ## 运行仿真器
 
-编译在 WSL 里做，需要 `~/emsdk` 里装好 Emscripten SDK：
+先生成字库（在 Windows 上跑；改了界面文字或换了字体后要重跑）：
+
+```sh
+uv run --with freetype-py -- python -I tools/fontpack/build_fonts.py tools/fontpack/fonts.json
+```
+
+字体文件放在 `third_party/fonts/`，来源见那里的说明。生成的字库在 `ui/fonts/gen/`，不进 git。
+
+再编译。编译在 WSL 里做，需要 `~/emsdk` 里装好 Emscripten SDK：
 
 ```sh
 bash simulator/build.sh
@@ -40,6 +48,7 @@ node simulator/tools/snapshot.mjs out.png --tap 240,350 --key 0
 
 第 1 阶段（设计与骨架）进行中。硬件未到货，开发都在仿真器上做。
 
-- 已有：LVGL 编译成 WebAssembly 的流程、浏览器外壳、墨水屏刷新模型（参数是占位值）、无浏览器截图工具。
-- `ui/` 里目前只是一个验证用的界面，正式界面等风格选定后再写。
-- 还没有：假 agent、电脑端服务、正式字体、固件工程。
+- 已有：九个触摸界面（`ui/src/ct_ui.c`），数据是内置的演示数据；字库生成工具；仿真器（先黑白、停下后叠加灰度的两遍刷新，参数是占位值）；无浏览器截图工具。
+- 还没有：假 agent（让数据动起来）、电脑端服务、固件工程。
+
+进度和结论见 `docs/STATUS.md`。

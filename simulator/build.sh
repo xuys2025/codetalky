@@ -39,9 +39,13 @@ mkdir -p "$BUILD" "$OUT"
 
 mapfile -t LVGL_SRC < <(find "$LVGL/src" -name '*.c' \
   ! -path '*/drivers/*' ! -path '*/libs/thorvg/*' | sort)
-mapfile -t OWN_SRC < <({ find "$ROOT/ui/src" -name '*.c'; find "$SIM/wasm" -name '*.c'; } | sort)
+if [ ! -f "$ROOT/ui/fonts/gen/ct_fonts.h" ]; then
+  echo "fonts missing: run tools/fontpack/build_fonts.py first (see README)" >&2
+  exit 1
+fi
+mapfile -t OWN_SRC < <({ find "$ROOT/ui/src" "$ROOT/ui/fonts/gen" -name '*.c'; find "$SIM/wasm" -name '*.c'; } | sort)
 
-CFLAGS="-O2 -DLV_CONF_INCLUDE_SIMPLE -DLV_LVGL_H_INCLUDE_SIMPLE -I$SIM -I$LVGL -I$ROOT/ui/include"
+CFLAGS="-O2 -DLV_CONF_INCLUDE_SIMPLE -DLV_LVGL_H_INCLUDE_SIMPLE -I$SIM -I$LVGL -I$ROOT/ui/include -I$ROOT/ui/src -I$ROOT/ui/fonts/gen"
 LDFLAGS="-O2 -sMODULARIZE=1 -sEXPORT_NAME=createCodeTalkySim -sENVIRONMENT=web,node"
 LDFLAGS+=" -sALLOW_MEMORY_GROWTH=1 -sEXPORTED_RUNTIME_METHODS=HEAPU8"
 LDFLAGS+=" -sEXPORTED_FUNCTIONS=_main,_malloc,_free"

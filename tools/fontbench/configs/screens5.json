@@ -1,0 +1,14 @@
+{
+  "levels": ["aa-bw", "overlay"],
+  "sets": [
+    {
+      "slug": "r3-sarasa-hybrid",
+      "tones": true,
+      "body_size": 20,
+      "line_height": 27,
+      "text": { "path": "D:/CodeTalky/third_party/fonts/sarasa-ui-sc/SarasaUiSC-Regular.ttf", "hinting": "native", "grey_hinting": "mono" },
+      "bold": { "path": "D:/CodeTalky/third_party/fonts/sarasa-ui-sc/SarasaUiSC-SemiBold.ttf", "hinting": "native", "grey_hinting": "mono" },
+      "mono": { "path": "D:/CodeTalky/third_party/fonts/jetbrains-mono/JetBrainsMono-Medium.ttf", "grey_hinting": "mono" }
+    }
+  ]
+}

@@ -43,7 +43,16 @@ class Font:
         if "wght" in spec:
             self.face.set_var_design_coords((spec["wght"],))
         self.face.set_pixel_sizes(0, size)
-        if grey:
+        self.render_mode = None
+        if grey and spec.get("grey_hinting") == "mono":
+            # Grid-fit the outline as for 1-bit (stems snap to whole pixels), then
+            # anti-alias it: thresholding this at 50 % gives back the clean 1-bit glyph,
+            # and the in-between levels only smooth curves and diagonals.
+            self.flags = FT.FT_LOAD_TARGET_MONO
+            if spec.get("hinting") != "native":
+                self.flags |= FT.FT_LOAD_FORCE_AUTOHINT
+            self.render_mode = FT.FT_RENDER_MODE_NORMAL
+        elif grey:
             self.flags = FT.FT_LOAD_RENDER | FT.FT_LOAD_TARGET_LIGHT
         elif spec.get("hinting") == "native":
             # use the font's own TrueType instructions (only useful for properly hinted fonts)
@@ -56,6 +65,8 @@ class Font:
         if ch not in self.glyphs:
             self.face.load_char(ch, self.flags)
             g = self.face.glyph
+            if self.render_mode is not None:
+                g.render(self.render_mode)
             bm = g.bitmap
             w, h = bm.width, bm.rows
             mask = Image.new("L", (max(w, 1), max(h, 1)), 0)
@@ -274,6 +285,9 @@ def render(spec, levels=2):
 
     if levels == "overlay":
         img = overlay_levels(img)
+    elif levels == "aa-bw":
+        # what the fast black/white pass shows if it is derived from the same glyphs
+        img = img.point(lambda v: 255 if v >= 128 else 0)
     elif grey:
         step = 255 / (levels - 1)
         img = img.point(lambda v: round(round(v / step) * step))
@@ -293,7 +307,7 @@ def main():
             except Exception as error:
                 print(f"skip {spec['slug']}: {type(error).__name__}: {error}")
                 continue
-            suffix = "-bw" if levels == 2 else ("-overlay" if levels == "overlay" else f"-{levels}gray")
+            suffix = {2: "-bw", "overlay": "-overlay", "aa-bw": "-aabw"}.get(levels, f"-{levels}gray")
             path = out_dir / f"{spec['slug']}{suffix}.png"
             img.save(path)
             fits = "fits" if body_end <= 718 else f"OVERFLOWS by {body_end - 718}px"

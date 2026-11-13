@@ -8,10 +8,12 @@ const PANEL = {
   fastMs: 420, // page change with the quick waveform
   fullMs: 1300, // full refresh, clears ghosting
   ghost: 0.07, // reflectance lost where a pixel went black -> white without a full refresh
+  overlayDelayMs: 450, // how long the page must be still before the grey pass
+  overlayMs: 180, // the grey overlay pass itself (12 frames in the vendor waveform)
 };
 const PAPER = [232, 230, 222];
 const INK = [30, 30, 30];
-const MODE_NAMES = ['局刷', '快刷', '全刷'];
+const MODE_NAMES = ['局刷', '快刷', '全刷', '灰度叠加'];
 
 const canvas = document.getElementById('epd');
 const ctx = canvas.getContext('2d');
@@ -27,6 +29,9 @@ let pendingRects = [];
 let busy = Promise.resolve();
 let queued = 0;
 let partialsSinceFull = 0;
+let overlayRect = null; // area shown in black/white only, waiting for its grey pass
+let overlayTimer = null;
+let greyEnabled = true;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -57,6 +62,46 @@ function captureTarget(rect) {
     }
   }
   return out;
+}
+
+// The same rect as the 4 states the grey overlay can show: 0 ink, 1/3, 2/3, 1 paper.
+function captureGrey(rect) {
+  const w = rect.x2 - rect.x1 + 1;
+  const h = rect.y2 - rect.y1 + 1;
+  const out = new Float32Array(w * h);
+  const heap = sim.HEAPU8;
+  const base = sim._sim_framebuffer();
+  for (let y = 0; y < h; y++) {
+    let j = base + ((rect.y1 + y) * W + rect.x1) * 2;
+    for (let x = 0; x < w; x++, j += 2) {
+      const c = heap[j] | (heap[j + 1] << 8);
+      const lum = ((c >> 11) & 0x1f) * 2.47 + ((c >> 5) & 0x3f) * 2.39 + (c & 0x1f) * 0.9;
+      out[y * w + x] = lum >= 213 ? 1 : lum >= 128 ? 2 / 3 : lum >= 43 ? 1 / 3 : 0;
+    }
+  }
+  return out;
+}
+
+// Once the page has been still for a moment, add the two grey levels to what was
+// drawn in black and white. Pixels that stay white keep whatever ghosting they have.
+async function overlay() {
+  if (!greyEnabled || !overlayRect) return;
+  const rect = overlayRect;
+  overlayRect = null;
+  const started = performance.now();
+  const grey = captureGrey(rect);
+  await sleep(PANEL.overlayMs);
+  fill(rect, (i, k) => (grey[k] === 1 ? shown[i] : grey[k]));
+  $('st-mode').textContent = MODE_NAMES[3];
+  $('st-ms').textContent = `${Math.round(performance.now() - started)} ms`;
+}
+
+function scheduleOverlay(rect) {
+  overlayRect = overlayRect ? unionOf([overlayRect, rect]) : rect;
+  clearTimeout(overlayTimer);
+  overlayTimer = setTimeout(() => {
+    busy = busy.then(overlay);
+  }, PANEL.overlayDelayMs);
 }
 
 function paint(rect) {
@@ -135,6 +180,7 @@ function onFlush(x1, y1, x2, y2, last, mode) {
     queued--;
     $('st-queue').textContent = String(queued);
   });
+  scheduleOverlay(mode === 2 ? { x1: 0, y1: 0, x2: W - 1, y2: H - 1 } : rect);
 }
 
 function onVibrate(ms) {
@@ -205,6 +251,9 @@ function bindInput() {
 
   $('scale').addEventListener('change', (e) => {
     canvas.style.setProperty('--screen-w', `${e.target.value}px`);
+  });
+  $('grey').addEventListener('change', (e) => {
+    greyEnabled = e.target.checked;
   });
 }
 
