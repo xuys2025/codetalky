@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>紧凑版 · 会话列表</title>
+<title>触摸版 · 会话列表</title>
 <script src="./support.js"></script>
 </head>
 <body>
@@ -11,52 +11,36 @@
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700;800&family=Noto+Sans+SC:wght@500;700&display=swap" rel="stylesheet">
 <style>
 body{margin:0}
-button{font:inherit;color:inherit;background:none;border:0;text-align:left;cursor:pointer}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+.sb{height:36px;padding:0 14px;background:#000;color:#fff;display:flex;align-items:center;justify-content:space-between;font-size:18px;font-weight:700}
+.nav{height:56px;display:flex;align-items:center;border-bottom:3px solid #000}
+.ttl{flex:1;padding:0 14px;font-size:24px;font-weight:800}
+.chip{font-size:18px;font-weight:700;padding:1px 8px}
+.on{background:#000;color:#fff}
+.box{border:2px solid #000}
+.row{display:block;width:100%;height:104px;box-sizing:border-box;padding:7px 14px;border-bottom:2px solid #000;text-align:left}
+.r1{display:flex;align-items:center;gap:10px}
+.r1 b{font-size:22px;font-weight:800}
+.m{flex:1;font-size:18px}
+.r2{display:flex;align-items:center;gap:8px;margin-top:4px}
+.vb{border:2px solid #000;font-size:18px;font-weight:700;padding:0 5px}
+.p{flex:1;font-size:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.go{font-size:26px;font-weight:800;line-height:1}
+.r3{display:flex;justify-content:space-between;margin-top:3px;font-size:18px}
+.bar{height:76px;padding:0 14px;display:flex;align-items:center;gap:10px;border-top:3px solid #000;margin-top:auto}
+.pg{width:60px;height:56px;border:3px solid #000;font-size:28px;font-weight:800;text-align:center}
 </style>
 </helmet>
 <div style="width: 480px; height: 800px; box-sizing: border-box; background: #fff; color: #000; font-family: 'JetBrains Mono', 'Noto Sans SC', monospace; font-weight: 500; display: flex; flex-direction: column">
-<div style="height: 36px; padding: 0 14px; background: #000; color: #fff; display: flex; align-items: center; justify-content: space-between; font-size: 18px; font-weight: 700">
-<span>codetalky</span>
-<span>14:32 · 82%</span>
-</div>
-<div style="height: 44px; padding: 0 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 3px solid #000">
-<span style="font-size: 22px; font-weight: 700">会话 6</span>
-<span style="background: #000; color: #fff; font-size: 18px; font-weight: 700; padding: 2px 10px">2 个等你</span>
-</div>
-<button style="display: block; width: 100%; height: 110px; box-sizing: border-box; padding: 9px 14px; border-bottom: 2px solid #000">
-<span style="display: flex; align-items: center; gap: 10px"><span style="font-size: 22px; font-weight: 800">codetalky</span><span style="flex-grow: 1; font-size: 18px">claude · opus-5.5</span><span style="background: #000; color: #fff; font-size: 18px; font-weight: 700; padding: 1px 8px">等批准</span></span>
-<span style="display: flex; align-items: center; gap: 8px; margin-top: 6px"><span style="flex-shrink: 0; border: 2px solid #000; font-size: 18px; font-weight: 700; padding: 0 5px">Edit</span><span style="font-size: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">src/bridge/hooks.ts</span></span>
-<span style="display: flex; justify-content: space-between; margin-top: 6px; font-size: 18px"><span>读 12 · 改 3 · <span style="font-weight: 700">+86 −21</span></span><span>等了 2 分</span></span>
-</button>
-<button style="display: block; width: 100%; height: 110px; box-sizing: border-box; padding: 9px 14px; border-bottom: 2px solid #000">
-<span style="display: flex; align-items: center; gap: 10px"><span style="font-size: 22px; font-weight: 800">blog-engine</span><span style="flex-grow: 1; font-size: 18px">codex · gpt-5</span><span style="background: #000; color: #fff; font-size: 18px; font-weight: 700; padding: 1px 8px">等回答</span></span>
-<span style="display: flex; align-items: center; gap: 8px; margin-top: 6px"><span style="flex-shrink: 0; border: 2px solid #000; font-size: 18px; font-weight: 700; padding: 0 5px">问</span><span style="font-size: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">会话状态存在哪里</span></span>
-<span style="display: flex; justify-content: space-between; margin-top: 6px; font-size: 18px"><span>读 7 · 改 0</span><span>等了 5 分</span></span>
-</button>
-<button style="display: block; width: 100%; height: 110px; box-sizing: border-box; padding: 9px 14px; border-bottom: 2px solid #000">
-<span style="display: flex; align-items: center; gap: 10px"><span style="font-size: 22px; font-weight: 800">firmware</span><span style="flex-grow: 1; font-size: 18px">claude · sonnet-5.5</span><span style="border: 2px solid #000; font-size: 18px; font-weight: 700; padding: 0 7px">运行中</span></span>
-<span style="display: flex; align-items: center; gap: 8px; margin-top: 6px"><span style="flex-shrink: 0; border: 2px solid #000; font-size: 18px; font-weight: 700; padding: 0 5px">Edit</span><span style="font-size: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">display/epd_driver.c</span></span>
-<span style="display: flex; justify-content: space-between; margin-top: 6px; font-size: 18px"><span>读 21 · 改 4 · <span style="font-weight: 700">+132 −40</span></span><span>8 分 · 任务 3/5</span></span>
-</button>
-<button style="display: block; width: 100%; height: 110px; box-sizing: border-box; padding: 9px 14px; border-bottom: 2px solid #000">
-<span style="display: flex; align-items: center; gap: 10px"><span style="font-size: 22px; font-weight: 800">landing</span><span style="flex-grow: 1; font-size: 18px">claude · haiku-5.5</span><span style="border: 2px solid #000; font-size: 18px; font-weight: 700; padding: 0 7px">运行中</span></span>
-<span style="display: flex; align-items: center; gap: 8px; margin-top: 6px"><span style="flex-shrink: 0; border: 2px solid #000; font-size: 18px; font-weight: 700; padding: 0 5px">Bash</span><span style="font-size: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">pnpm build</span></span>
-<span style="display: flex; justify-content: space-between; margin-top: 6px; font-size: 18px"><span>读 4 · 改 2 · <span style="font-weight: 700">+18 −6</span></span><span>2 分 · 任务 1/3</span></span>
-</button>
-<button style="display: block; width: 100%; height: 110px; box-sizing: border-box; padding: 9px 14px; border-bottom: 2px solid #000">
-<span style="display: flex; align-items: center; gap: 10px"><span style="font-size: 22px; font-weight: 800">api-server</span><span style="flex-grow: 1; font-size: 18px">codex · gpt-5</span><span style="font-size: 18px; font-weight: 700">完成</span></span>
-<span style="display: flex; align-items: center; gap: 8px; margin-top: 6px"><span style="flex-shrink: 0; border: 2px solid #000; font-size: 18px; font-weight: 700; padding: 0 5px">Bash</span><span style="font-size: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">npm test · 12 个全过</span></span>
-<span style="display: flex; justify-content: space-between; margin-top: 6px; font-size: 18px"><span>读 9 · 改 5 · <span style="font-weight: 700">+64 −12</span></span><span>用时 12 分</span></span>
-</button>
-<button style="display: block; width: 100%; height: 110px; box-sizing: border-box; padding: 9px 14px; border-bottom: 3px solid #000">
-<span style="display: flex; align-items: center; gap: 10px"><span style="font-size: 22px; font-weight: 800">docs-site</span><span style="flex-grow: 1; font-size: 18px">claude · sonnet-5.5</span><span style="font-size: 18px; font-weight: 700; text-decoration: underline; text-underline-offset: 4px">出错</span></span>
-<span style="display: flex; align-items: center; gap: 8px; margin-top: 6px"><span style="flex-shrink: 0; border: 2px solid #000; font-size: 18px; font-weight: 700; padding: 0 5px">API</span><span style="font-size: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">接口限流，已停在第 4 步</span></span>
-<span style="display: flex; justify-content: space-between; margin-top: 6px; font-size: 18px"><span>读 15 · 改 1 · <span style="font-weight: 700">+9 −2</span></span><span>停了 20 分</span></span>
-</button>
-<div style="flex-grow: 1; padding: 0 14px; display: flex; align-items: center; justify-content: space-between; font-size: 18px">
-<span>1/1 页 · 音量键翻页</span>
-<span>BOOT 说话</span>
-</div>
+<div class="sb"><span>codetalky</span><span>14:32 · 82%</span></div>
+<div class="nav"><span class="ttl">会话 6</span><span class="chip on" style="margin-right: 14px">2 个等你</span></div>
+<button class="row"><span class="r1"><b>codetalky</b><span class="m">claude · opus-5.5</span><span class="chip on">等批准</span></span><span class="r2"><span class="vb">Edit</span><span class="p">src/bridge/hooks.ts</span><span class="go">›</span></span><span class="r3"><span>读 12 · 改 3 · <b>+86 −21</b></span><span>等了 2 分</span></span></button>
+<button class="row"><span class="r1"><b>blog-engine</b><span class="m">codex · gpt-5</span><span class="chip on">等回答</span></span><span class="r2"><span class="vb">问</span><span class="p">筛选条件存在哪里</span><span class="go">›</span></span><span class="r3"><span>读 7 · 改 0</span><span>等了 5 分</span></span></button>
+<button class="row"><span class="r1"><b>firmware</b><span class="m">claude · sonnet-5.5</span><span class="chip box">运行中</span></span><span class="r2"><span class="vb">Edit</span><span class="p">display/epd_driver.c</span><span class="go">›</span></span><span class="r3"><span>读 21 · 改 4 · <b>+132 −40</b></span><span>8 分 · 任务 3/5</span></span></button>
+<button class="row"><span class="r1"><b>landing</b><span class="m">claude · haiku-5.5</span><span class="chip box">运行中</span></span><span class="r2"><span class="vb">Bash</span><span class="p">pnpm build</span><span class="go">›</span></span><span class="r3"><span>读 4 · 改 2 · <b>+18 −6</b></span><span>2 分 · 任务 1/3</span></span></button>
+<button class="row"><span class="r1"><b>api-server</b><span class="m">codex · gpt-5</span><span class="chip">完成</span></span><span class="r2"><span class="vb">Bash</span><span class="p">npm test · 12 个全过</span><span class="go">›</span></span><span class="r3"><span>读 9 · 改 5 · <b>+64 −12</b></span><span>用时 12 分</span></span></button>
+<button class="row"><span class="r1"><b>docs-site</b><span class="m">claude · sonnet-5.5</span><span class="chip" style="text-decoration: underline; text-underline-offset: 4px">出错</span></span><span class="r2"><span class="vb">API</span><span class="p">接口限流，已停在第 4 步</span><span class="go">›</span></span><span class="r3"><span>读 15 · 改 1 · <b>+9 −2</b></span><span>停了 20 分</span></span></button>
+<div class="bar"><button class="pg" aria-label="上一页">‹</button><span style="font-size: 20px; font-weight: 700">1/1</span><button class="pg" aria-label="下一页">›</button><span style="flex: 1"></span><span style="font-size: 18px">点一行看详情</span></div>
 </div>
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":480,"height":800}}'>

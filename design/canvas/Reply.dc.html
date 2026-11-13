@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>触摸版 · 回复</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700;800&family=Noto+Sans+SC:wght@500;700&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+.sb{height:36px;padding:0 14px;background:#000;color:#fff;display:flex;align-items:center;justify-content:space-between;font-size:18px;font-weight:700}
+.nav{height:56px;display:flex;align-items:center;border-bottom:3px solid #000}
+.back{width:64px;height:56px;border-right:2px solid #000;font-size:30px;font-weight:800;text-align:center}
+.ttl{flex:1;padding:0 12px;font-size:24px;font-weight:800}
+.chip{margin-right:14px;font-size:18px;font-weight:700;padding:1px 8px}
+.box{border:2px solid #000}
+.meta{height:34px;padding:0 14px;display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid #000;font-size:18px}
+.lab{display:flex;align-items:center;gap:8px;margin-top:12px}
+.lab b{background:#000;color:#fff;font-size:18px;padding:0 7px}
+.lab i{flex:1;height:2px;background:#000}
+.q{display:flex;align-items:center;justify-content:space-between;width:100%;height:60px;box-sizing:border-box;padding:0 14px;border:3px solid #000;font-family:'Noto Sans SC',sans-serif;font-size:22px;font-weight:700;text-align:left}
+</style>
+</helmet>
+<div style="width: 480px; height: 800px; box-sizing: border-box; background: #fff; color: #000; font-family: 'JetBrains Mono', 'Noto Sans SC', monospace; font-weight: 500; display: flex; flex-direction: column">
+<div class="sb"><span>codetalky</span><span>14:32 · 82%</span></div>
+<div class="nav"><button class="back" aria-label="返回">‹</button><span class="ttl">CodeTalky</span><span class="chip box">回复</span></div>
+<div class="meta"><span>claude · fable-5.2</span><span>已完成，等你的下一步</span></div>
+<div style="flex: 1; min-height: 0; padding: 0 14px; display: flex; flex-direction: column">
+<div class="lab"><b>点一句直接发</b><i></i></div>
+<div style="display: flex; flex-direction: column; gap: 8px; margin-top: 10px">
+<button class="q"><span>继续下一步</span><span style="font-size: 24px">›</span></button>
+<button class="q"><span>跑一下测试</span><span style="font-size: 24px">›</span></button>
+<button class="q"><span>提交这些改动</span><span style="font-size: 24px">›</span></button>
+<button class="q"><span>先停一下，等我回电脑</span><span style="font-size: 24px">›</span></button>
+<button class="q"><span>撤销刚才的修改</span><span style="font-size: 24px">›</span></button>
+</div>
+<div class="lab"><b>或者自己说</b><i></i></div>
+<button style="width: 100%; height: 116px; margin-top: 10px; background: #000; color: #fff; font-family: 'Noto Sans SC', sans-serif; text-align: center"><span style="display: block; font-size: 28px; font-weight: 700">按住这里说话</span><span style="display: block; margin-top: 6px; font-size: 18px">松开后先显示识别出的文字，确认了再发</span></button>
+<div style="flex: 1; display: flex; align-items: center; justify-content: center; font-size: 18px">按住机身上的 BOOT 键也一样</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":480,"height":800}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

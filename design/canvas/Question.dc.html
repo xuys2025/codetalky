@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>触摸版 · 提问</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700;800&family=Noto+Sans+SC:wght@500;700&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+.sb{height:36px;padding:0 14px;background:#000;color:#fff;display:flex;align-items:center;justify-content:space-between;font-size:18px;font-weight:700}
+.nav{height:56px;display:flex;align-items:center;border-bottom:3px solid #000}
+.back{width:64px;height:56px;border-right:2px solid #000;font-size:30px;font-weight:800;text-align:center}
+.ttl{flex:1;padding:0 12px;font-size:24px;font-weight:800}
+.chip{margin-right:14px;font-size:18px;font-weight:700;padding:1px 8px}
+.on{background:#000;color:#fff}
+.meta{height:34px;padding:0 14px;display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid #000;font-size:18px}
+.lab{display:flex;align-items:center;gap:8px;margin-top:10px}
+.lab b{background:#000;color:#fff;font-size:18px;padding:0 7px}
+.lab i{flex:1;height:2px;background:#000}
+.opt{display:flex;align-items:center;gap:14px;width:100%;height:92px;box-sizing:border-box;padding:0 14px;border:3px solid #000;text-align:left}
+.num{flex-shrink:0;width:48px;height:48px;background:#000;color:#fff;font-size:28px;font-weight:800;display:flex;align-items:center;justify-content:center}
+</style>
+</helmet>
+<div style="width: 480px; height: 800px; box-sizing: border-box; background: #fff; color: #000; font-family: 'JetBrains Mono', 'Noto Sans SC', monospace; font-weight: 500; display: flex; flex-direction: column">
+<div class="sb"><span>codetalky</span><span>14:32 · 82%</span></div>
+<div class="nav"><button class="back" aria-label="返回">‹</button><span class="ttl">blog-engine</span><span class="chip on">等回答</span></div>
+<div class="meta"><span>codex · gpt-5</span><span>任务 2/4 · 等了 5 分</span></div>
+<div style="flex: 1; min-height: 0; padding: 0 14px; display: flex; flex-direction: column">
+<div class="lab"><b>它问你</b><i></i></div>
+<p style="margin: 8px 0 0; font-family: 'Noto Sans SC', sans-serif; font-size: 24px; font-weight: 700; line-height: 33px">用户保存的筛选条件，存在哪里？</p>
+<p style="margin: 6px 0 0; font-family: 'Noto Sans SC', sans-serif; font-size: 20px; line-height: 27px">列表页要记住每个用户上次的筛选，三种做法成本不一样。</p>
+<div style="display: flex; flex-direction: column; gap: 10px; margin-top: 14px">
+<button class="opt"><span class="num">1</span><span><span style="display: block; font-size: 22px; font-weight: 800">浏览器本地</span><span style="display: block; margin-top: 2px; font-size: 18px">最简单，换设备就没了</span></span></button>
+<button class="opt"><span class="num">2</span><span><span style="display: block; font-size: 22px; font-weight: 800">数据库里加一张表</span><span style="display: block; margin-top: 2px; font-size: 18px">跨设备，要写迁移</span></span></button>
+<button class="opt"><span class="num">3</span><span><span style="display: block; font-size: 22px; font-weight: 800">放进网址参数</span><span style="display: block; margin-top: 2px; font-size: 18px">能分享链接，不记住上次</span></span></button>
+</div>
+<button style="width: 100%; height: 64px; margin-top: 14px; box-sizing: border-box; border: 3px solid #000; font-size: 22px; font-weight: 800">都不是，按住这里说</button>
+<div style="flex: 1; display: flex; align-items: center; justify-content: center; font-size: 18px">点一个选项，就直接发给它</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":480,"height":800}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>
