@@ -30,11 +30,14 @@ export function resolveCommand(name: string, env: NodeJS.ProcessEnv = process.en
       const kind = extname(file).toLowerCase();
       if (kind === '.cmd' || kind === '.bat') {
         // npm shim: "%dp0%\node_modules\...\bin\claude.exe"   %*
+        //       or "%_prog%"  "%dp0%\node_modules\@openai\codex\bin\codex.js" %*
+        // Run the target directly: cmd.exe would mangle arguments with & or quotes.
+        // (The second kind first checks for "%dp0%\node.exe": that is the interpreter, not the target.)
         const shim = readFileSync(file, 'utf8');
-        const target = /"%dp0%\\([^"]+?\.exe)"/i.exec(shim)?.[1];
-        if (target) {
-          const exe = resolve(dirname(file), target);
-          if (existsSync(exe)) return { file: exe, prefix: [] };
+        for (const [, target] of shim.matchAll(/"%dp0%\\([^"]+?\.(?:exe|js|mjs|cjs))"/gi)) {
+          if (/^node\.exe$/i.test(target!)) continue;
+          const real = resolve(dirname(file), target!);
+          if (existsSync(real)) return /\.exe$/i.test(real) ? { file: real, prefix: [] } : { file: process.execPath, prefix: [real] };
         }
         return { file: env.ComSpec ?? 'cmd.exe', prefix: ['/d', '/s', '/c', file] };
       }

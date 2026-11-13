@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
 import { ClaudeSource } from '../src/claude/source.ts';
 import { realClock } from '../src/clock.ts';
 import { Hub } from '../src/hub.ts';
-import { asKeys } from '../src/run.ts';
+import { asKeys, resolveCommand } from '../src/run.ts';
 import { Runs, parseFromRun } from '../src/runs.ts';
 import { startServer } from '../src/server.ts';
 
@@ -77,4 +80,63 @@ test('a managed run: the device types into the agent running in its terminal', {
     claude.stop();
     await server.close();
   }
+});
+
+test('a hook that hangs up is noticed, so its held request can go', async () => {
+  const hub = new Hub(realClock);
+  let hungUp = false;
+  const server = await startServer(hub, realClock, {
+    host: '127.0.0.1',
+    port: 0,
+    simDir: null,
+    post: {
+      '/hooks/claude': (_body, _headers, gone) =>
+        new Promise((resolve) => gone.addEventListener('abort', () => ((hungUp = true), resolve({ status: 200 })))),
+    },
+    hostName: '测试机',
+    hostId: 'test',
+    quick: [],
+    tzMinutes: 0,
+    flushMs: 50,
+    log: () => {},
+  });
+  try {
+    const caller = new AbortController();
+    const call = fetch(`http://127.0.0.1:${server.port}/hooks/claude`, { method: 'POST', body: '{}', signal: caller.signal }).catch(() => null);
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(hungUp, false);
+    caller.abort();
+    await call;
+    await until('the server to notice', () => hungUp, 3000);
+  } finally {
+    await server.close();
+  }
+});
+
+test('npm shims on Windows are run without cmd.exe', { skip: process.platform !== 'win32' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ct-shim-'));
+  mkdirSync(join(dir, 'node_modules', 'a', 'bin'), { recursive: true });
+  mkdirSync(join(dir, 'node_modules', 'b', 'bin'), { recursive: true });
+  writeFileSync(join(dir, 'node_modules', 'a', 'bin', 'a.exe'), '');
+  writeFileSync(join(dir, 'node_modules', 'b', 'bin', 'b.js'), '');
+  writeFileSync(join(dir, 'a.cmd'), '@ECHO off\r\n"%dp0%\\node_modules\\a\\bin\\a.exe"   %*\r\n');
+  // What npm writes for a JavaScript bin (Codex's), node.exe check included.
+  writeFileSync(
+    join(dir, 'b.cmd'),
+    [
+      '@ECHO off',
+      'IF EXIST "%dp0%\\node.exe" (',
+      '  SET "_prog=%dp0%\\node.exe"',
+      ') ELSE (',
+      '  SET "_prog=node"',
+      ')',
+      'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\b\\bin\\b.js" %*',
+      '',
+    ].join('\r\n'),
+  );
+  writeFileSync(join(dir, 'c.cmd'), '@ECHO off\r\necho hi\r\n');
+  const env = { PATH: dir };
+  assert.deepEqual(resolveCommand('a', env), { file: join(dir, 'node_modules', 'a', 'bin', 'a.exe'), prefix: [] });
+  assert.deepEqual(resolveCommand('b', env), { file: process.execPath, prefix: [join(dir, 'node_modules', 'b', 'bin', 'b.js')] });
+  assert.deepEqual(resolveCommand('c', env).prefix.slice(0, 3), ['/d', '/s', '/c']);
 });

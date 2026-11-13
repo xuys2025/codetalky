@@ -14,7 +14,8 @@ import type { Pairing } from './pairing.ts';
 import { parseFromRun, type Runs, type ToRun } from './runs.ts';
 
 /** Handles a POST from an agent hook; headers carry the managed-run token. */
-export type PostHandler = (body: unknown, headers: IncomingHttpHeaders) => Promise<PostReply>;
+/** gone: fires if the caller hangs up before the reply. */
+export type PostHandler = (body: unknown, headers: IncomingHttpHeaders, gone: AbortSignal) => Promise<PostReply>;
 
 /** Answer to a POST from an agent hook. */
 export interface PostReply {
@@ -147,7 +148,13 @@ function handlePost(
     } catch {
       return sendJson(res, 400, { error: 'bad json' });
     }
-    handler(body, req.headers).then(
+    // The agent hangs up on a held request when it gets its answer elsewhere, e.g.
+    // someone answered the same prompt in the terminal.
+    const gone = new AbortController();
+    res.on('close', () => {
+      if (!res.writableFinished) gone.abort();
+    });
+    handler(body, req.headers, gone.signal).then(
       (reply) => {
         if (!res.destroyed) sendJson(res, reply.status, reply.body);
       },

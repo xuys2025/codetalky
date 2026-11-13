@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { CODEX_HOOK_SCRIPT, codexHooks } from '../src/claude/hooks.ts';
+import { HOOK_SCRIPT, codexHooks } from '../src/claude/hooks.ts';
 import { ClaudeSource } from '../src/claude/source.ts';
 import { ManualClock } from '../src/clock.ts';
 import { parsePatch } from '../src/codex/patch.ts';
@@ -121,16 +121,19 @@ test('Codex hook settings call the forwarding script with the port', () => {
   const set = codexHooks(8137, 570);
   const handler = set.hooks.PermissionRequest![0]!.hooks[0]!;
   assert.equal(handler.type, 'command');
-  assert.match(handler.command!, /codex-hook\.mjs" 8137$/);
+  assert.match(handler.command!, /\/hooks\/hook\.mjs" 8137 codex$/);
   assert.equal(handler.timeout, 600);
   assert.equal(set.hooks.SessionEnd![0]!.hooks[0]!.timeout, 3);
   assert.equal(set.isOurs(handler), true);
+  // Set up earlier on another port, or with the script's old name: still ours, so it gets replaced.
+  assert.equal(set.isOurs({ type: 'command', command: 'node "D:/x/bridge/hooks/codex-hook.mjs" 8140' }), true);
+  assert.equal(set.isOurs({ type: 'command', command: 'node "D:/x/bridge/hooks/hook.mjs" 8137 claude' }), false);
   assert.equal(set.isOurs({ type: 'command', command: 'python other.py' }), false);
 });
 
-function runHook(port: number, input: string, env: Record<string, string> = {}): Promise<string> {
+function runHook(port: number, input: string, env: Record<string, string> = {}, args: string[] = []): Promise<string> {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [CODEX_HOOK_SCRIPT, String(port)], { env: { ...process.env, ...env } });
+    const child = spawn(process.execPath, [HOOK_SCRIPT, String(port), ...args], { env: { ...process.env, ...env } });
     let out = '';
     child.stdout.on('data', (d: Buffer) => (out += d.toString()));
     child.on('exit', () => resolve(out.trim()));
@@ -139,12 +142,12 @@ function runHook(port: number, input: string, env: Record<string, string> = {}):
 }
 
 test('the forwarding script passes the event and the run token, and the answer back', async () => {
-  let got: { body: string; run: unknown } | null = null;
+  let got: { path: unknown; body: string; run: unknown } | null = null;
   const server = createServer((req, res) => {
     let body = '';
     req.on('data', (d) => (body += d));
     req.on('end', () => {
-      got = { body, run: req.headers['x-codetalky-run'] };
+      got = { path: req.url, body, run: req.headers['x-codetalky-run'] };
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end('{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"no"}}}');
     });
@@ -152,9 +155,12 @@ test('the forwarding script passes the event and the run token, and the answer b
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const port = (server.address() as AddressInfo).port;
   try {
-    const out = await runHook(port, '{"hook_event_name":"PermissionRequest"}', { CODETALKY_RUN: 'tok' });
+    const out = await runHook(port, '{"hook_event_name":"PermissionRequest"}', { CODETALKY_RUN: 'tok' }, ['codex']);
     assert.equal(JSON.parse(out).hookSpecificOutput.decision.behavior, 'deny');
-    assert.deepEqual(got, { body: '{"hook_event_name":"PermissionRequest"}', run: 'tok' });
+    assert.deepEqual(got, { path: '/hooks/codex', body: '{"hook_event_name":"PermissionRequest"}', run: 'tok' });
+    // Claude Code's SessionStart goes through the same script, to its own endpoint.
+    await runHook(port, '{"hook_event_name":"SessionStart"}', { CODETALKY_RUN: 'tok2' }, ['claude']);
+    assert.deepEqual(got, { path: '/hooks/claude', body: '{"hook_event_name":"SessionStart"}', run: 'tok2' });
   } finally {
     server.close();
   }

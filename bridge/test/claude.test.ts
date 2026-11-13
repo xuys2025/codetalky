@@ -6,7 +6,7 @@ import { test } from 'node:test';
 
 import { claudeHooks, mergeHooks, removeHooks } from '../src/claude/hooks.ts';
 import { ClaudeSource } from '../src/claude/source.ts';
-import { isRisky } from '../src/claude/tools.ts';
+import { claudeTools, dropCd, isRisky, targetOf } from '../src/claude/tools.ts';
 import { ManualClock } from '../src/clock.ts';
 import { Hub } from '../src/hub.ts';
 import type { PostReply } from '../src/server.ts';
@@ -94,6 +94,33 @@ test('nobody answers: after the hold the terminal asks instead', async () => {
   assert.deepEqual(await reply, { status: 200 });
   assert.equal(get().state, 'running');
   assert.match(get().say ?? '', /回电脑/);
+});
+
+test('answered in the terminal: Claude hangs up and the device leaves the prompt', async () => {
+  const { hub, source, get } = setup();
+  const gone = new AbortController();
+  const reply = source.handle({ session_id: SID, cwd: 'D:\\work\\shop', hook_event_name: 'PermissionRequest', ...edit }, {}, gone.signal);
+  await settled(reply);
+  const req = (get().ask as { req: string }).req;
+  gone.abort();
+  assert.deepEqual(await reply, { status: 200 });
+  assert.equal(get().state, 'running');
+  assert.equal(get().ask, undefined);
+  assert.equal(get().say, '已在电脑上处理');
+  // A late tap on the device finds nothing to answer.
+  assert.equal(hub.act({ t: 'approve', seq: 1, id: SID, req, allow: true }), 'stale');
+});
+
+test('answered in the terminal: the tool result also clears the prompt', async () => {
+  const { send, get } = setup();
+  const reply = send('PermissionRequest', edit);
+  await settled(reply);
+  assert.equal(get().state, 'approve');
+  // The agent didn't hang up, but it ran the tool: someone said yes at the computer.
+  await send('PostToolUse', { ...edit, tool_response: { filePath: edit.tool_input.file_path, structuredPatch: [] } });
+  assert.deepEqual(await reply, { status: 200 });
+  assert.equal(get().state, 'running');
+  assert.equal(get().ask, undefined);
 });
 
 test('the device leaving hands every held request back to the terminal', async () => {
@@ -289,9 +316,36 @@ test('hook settings are merged into a settings file and taken out again', () => 
       ],
     },
   ]);
-  mergeHooks(file, claudeHooks(8137, 570)); // again: no duplicates
-  assert.equal(JSON.parse(readFileSync(file, 'utf8')).hooks.Stop.length, 2);
+  // SessionStart takes only command hooks: it goes through the forwarding script.
+  const start = merged.hooks.SessionStart[0].hooks[0];
+  assert.equal(start.type, 'command');
+  assert.match(start.command, /\/hooks\/hook\.mjs" 8137 claude$/);
+  mergeHooks(file, claudeHooks(8140, 570)); // again, on another port: replaces, no duplicates
+  const again = JSON.parse(readFileSync(file, 'utf8'));
+  assert.equal(again.hooks.Stop.length, 2);
+  assert.equal(again.hooks.SessionStart.length, 1);
+  assert.match(again.hooks.SessionStart[0].hooks[0].command, / 8140 claude$/);
   removeHooks(file, claudeHooks(8137, 570));
   assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), original);
   assert.equal(removeHooks(file, claudeHooks(8137, 570)), null);
+});
+
+test('a leading cd into the project is left out of the command shown', () => {
+  const cwd = 'C:\\Users\\me\\proj';
+  assert.equal(dropCd('cd "C:/Users/me/proj" && npm test', cwd), 'npm test');
+  assert.equal(dropCd('cd /c/Users/me/proj; ls', cwd), 'ls');
+  assert.equal(dropCd("cd 'c:\\users\\me\\proj\\' && git status", cwd), 'git status');
+  // Somewhere else: that matters, keep it.
+  assert.equal(dropCd('cd ../other && npm test', cwd), 'cd ../other && npm test');
+  assert.equal(dropCd('cd /home/me/Proj && ls', '/home/me/proj'), 'cd /home/me/Proj && ls');
+  assert.equal(targetOf('Bash', { command: 'cd /home/me/proj && make' }, '/home/me/proj'), 'make');
+});
+
+test('a file ending in a newline is not counted one line long', () => {
+  const read = (content: string, numLines: number) =>
+    claudeTools.resultOf('Read', { file_path: 'a.txt' }, { type: 'text', file: { filePath: 'a.txt', content, numLines } }, undefined).res;
+  // What Claude Code sends: it splits on newlines.
+  assert.equal(read('zero\n', 2), '1 行');
+  assert.equal(read('a\nb', 2), '2 行');
+  assert.equal(read('a\nb\n', 3), '2 行');
 });

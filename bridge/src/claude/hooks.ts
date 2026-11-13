@@ -23,8 +23,17 @@ const CLAUDE_EVENTS = [
 ];
 const CODEX_EVENTS = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'Stop', 'SessionEnd'];
 
-/** The command Codex runs for every hook event. */
-export const CODEX_HOOK_SCRIPT = fileURLToPath(new URL('../../hooks/codex-hook.mjs', import.meta.url));
+/** The command hook that forwards an event to the bridge: every Codex event, and Claude Code's SessionStart. */
+export const HOOK_SCRIPT = fileURLToPath(new URL('../../hooks/hook.mjs', import.meta.url));
+
+const hookCommand = (script: string, port: number, agent: 'claude' | 'codex') => `node "${script.replace(/\\/g, '/')}" ${port} ${agent}`;
+
+/** Ours whatever port it was set up for (codex-hook.mjs is the script's old name). */
+function isOurCommand(h: HookHandler, agent: 'claude' | 'codex'): boolean {
+  if (h.type !== 'command' || typeof h.command !== 'string') return false;
+  const tail = agent === 'claude' ? ' claude' : '( codex)?';
+  return new RegExp(`[\\\\/]hooks[\\\\/](codex-)?hook\\.mjs" \\d+${tail}$`).test(h.command.trim());
+}
 
 interface HookHandler {
   type: string;
@@ -52,11 +61,20 @@ export function hookUrl(port: number): string {
 /** Held events get a little more than the hold, so the bridge always answers first. */
 const timeoutFor = (event: string, holdSeconds: number) => (HELD.has(event) ? holdSeconds + 30 : 5);
 
-/** Claude Code: one HTTP hook per event, all pointing at the bridge. */
-export function claudeHooks(port: number, holdSeconds: number): HookSet {
+/**
+ * Claude Code: one HTTP hook per event, all pointing at the bridge. SessionStart takes
+ * only command hooks, so that one goes through the forwarding script; without it a new
+ * session would stay invisible until its first prompt.
+ */
+export function claudeHooks(port: number, holdSeconds: number, script = HOOK_SCRIPT): HookSet {
   const url = hookUrl(port);
   const hooks: Record<string, HookGroup[]> = {};
   for (const event of CLAUDE_EVENTS) {
+    if (event === 'SessionStart') {
+      // A command hook inherits the session's environment, run token included.
+      hooks[event] = [{ hooks: [{ type: 'command', command: hookCommand(script, port, 'claude'), timeout: 5 }] }];
+      continue;
+    }
     hooks[event] = [
       {
         hooks: [
@@ -73,18 +91,20 @@ export function claudeHooks(port: number, holdSeconds: number): HookSet {
       },
     ];
   }
-  return { hooks, isOurs: (h) => h.type === 'http' && h.url === url };
+  // Any port, so setting up again on another port replaces the old hooks.
+  const ours = /^http:\/\/127\.0\.0\.1:\d+\/hooks\/claude$/;
+  return { hooks, isOurs: (h) => (h.type === 'http' && typeof h.url === 'string' && ours.test(h.url)) || isOurCommand(h, 'claude') };
 }
 
-/** Codex: command hooks only, so a small script forwards each event to the bridge. */
-export function codexHooks(port: number, holdSeconds: number, script = CODEX_HOOK_SCRIPT): HookSet {
-  const command = `node "${script.replace(/\\/g, '/')}" ${port}`;
+/** Codex: command hooks only, so the forwarding script carries each event to the bridge. */
+export function codexHooks(port: number, holdSeconds: number, script = HOOK_SCRIPT): HookSet {
+  const command = hookCommand(script, port, 'codex');
   const hooks: Record<string, HookGroup[]> = {};
   for (const event of CODEX_EVENTS) {
     const timeout = event === 'SessionEnd' ? 3 : timeoutFor(event, holdSeconds);
     hooks[event] = [{ hooks: [{ type: 'command', command, timeout }] }];
   }
-  return { hooks, isOurs: (h) => h.type === 'command' && typeof h.command === 'string' && h.command.includes('codex-hook.mjs') };
+  return { hooks, isOurs: (h) => isOurCommand(h, 'codex') };
 }
 
 /** The Claude Code settings, as `codetalky hooks` prints them. */

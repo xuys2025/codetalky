@@ -59,7 +59,7 @@ node src/main.ts hooks --merge ~/.claude/settings.json
 node src/main.ts            # 起服务；加 --fake 可以同时看演示会话
 ```
 
-之后在任何终端里开的 Claude Code 会话都会出现在设备上，批准请求和它的提问可以在设备上回答。设备没连上或期限内没回话时，Claude Code 照常在终端里问你。不用了就 `node src/main.ts hooks --remove ~/.claude/settings.json`。细节见 `docs/STATUS.md` 的“第 7 项”。
+之后在任何终端里开的 Claude Code 会话都会出现在设备上，批准请求和它的提问可以在设备上回答。终端里的确认框也照常弹出，在哪边答都行，另一边自动收起；设备没连上或期限内没回话时，就只在终端里答。不用了就 `node src/main.ts hooks --remove ~/.claude/settings.json`。细节见 `docs/STATUS.md` 的“第 7 项”。
 
 想从设备给 Claude 发新指令，用 `codetalky claude` 代替 `claude` 启动（参数照旧）。在 `bridge` 目录运行一次 `npm link`，之后任何终端里都有 `codetalky` 命令；不想装就用 `node <仓库>/bridge/src/main.ts claude`。它在终端里看起来和直接运行 `claude` 一样，设备发来的指令会像键盘输入一样打进去。
 
@@ -70,6 +70,8 @@ node src/main.ts hooks --codex --merge ~/.codex/hooks.json
 codex          # 进去后输入 /hooks，信任 CodeTalky 的钩子
 codetalky codex  # 想从设备发指令时用它代替 codex 启动
 ```
+
+`~/.codex/` 是 Codex 命令行和桌面版共用的，桌面版的设置里也有钩子信任，所以桌面版里的会话应该也会出现在设备上（还没实测）。
 
 有几台电脑跑 agent，就在每台上都开电脑端服务，用 `--name` 起个名字（比如 `--name 台式机`），设备会同时连上所有电脑。
 

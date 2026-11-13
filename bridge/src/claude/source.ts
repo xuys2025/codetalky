@@ -34,6 +34,8 @@ export interface ClaudeOptions {
 const FORGET_AFTER_S = 12 * 3600;
 const SWEEP_EVERY_MS = 10 * 60 * 1000;
 const NO_DECISION: PostReply = { status: 200 };
+/** What the device says when a held request was answered at the computer instead. */
+const ANSWERED_THERE = '已在电脑上处理';
 
 type Event = Record<string, unknown> & { session_id: string; hook_event_name: string };
 
@@ -126,14 +128,17 @@ export class ClaudeSource {
     for (const session of this.sessions.values()) this.releaseAll(session, '');
   }
 
-  /** Handle one hook POST. Resolves with the HTTP reply for Claude Code. */
-  handle(body: unknown, headers: IncomingHttpHeaders = {}): Promise<PostReply> {
+  /**
+   * Handle one hook POST. Resolves with the HTTP reply for Claude Code. gone fires if
+   * the agent stops waiting (the same prompt was answered in the terminal).
+   */
+  handle(body: unknown, headers: IncomingHttpHeaders = {}, gone?: AbortSignal): Promise<PostReply> {
     const event = obj(body);
     if (typeof event.session_id !== 'string' || !event.session_id || typeof event.hook_event_name !== 'string') {
       return Promise.resolve({ status: 400, body: { error: 'not a hook event' } });
     }
     const run = headers[RUN_HEADER];
-    return this.dispatch(event as Event, typeof run === 'string' && /^[0-9a-f-]{36}$/.test(run) ? run : null);
+    return this.dispatch(event as Event, typeof run === 'string' && /^[0-9a-f-]{36}$/.test(run) ? run : null, gone);
   }
 
   /** The run token from a session's hooks. While that run's launcher is connected the device can type into it. */
@@ -224,7 +229,7 @@ export class ClaudeSource {
     return session;
   }
 
-  private async dispatch(event: Event, run: string | null): Promise<PostReply> {
+  private async dispatch(event: Event, run: string | null, gone?: AbortSignal): Promise<PostReply> {
     const session = this.session(event, run);
     const id = session.id;
     const cwd = str(event.cwd);
@@ -246,11 +251,12 @@ export class ClaudeSource {
           delete s.report;
           delete s.err;
           delete s.now;
+          delete s.say; // the last report's words; new ones come from the transcript
           this.log(s, { verb: '你', target: firstLine(str(event.prompt) ?? '') });
         });
         return NO_DECISION;
       case 'PreToolUse':
-        if (tool === 'AskUserQuestion') return this.holdQuestion(session, input);
+        if (tool === 'AskUserQuestion') return this.holdQuestion(session, input, gone);
         this.change(id, (s) => {
           if (s.state !== 'approve' && s.state !== 'question' && s.state !== 'running') {
             s.state = 'running';
@@ -266,12 +272,14 @@ export class ClaudeSource {
         return NO_DECISION;
       case 'PermissionRequest':
         if (tool === 'AskUserQuestion' || tool === 'ExitPlanMode') return NO_DECISION;
-        return this.holdPermission(session, tool, input, cwd);
+        return this.holdPermission(session, tool, input, cwd, gone);
       case 'PostToolUse':
+        this.settled(session, tool, input);
         if (tool === 'TodoWrite' || tool === 'AskUserQuestion') return NO_DECISION;
         this.change(id, (s) => this.record(s, tool, input, event.tool_response, cwd));
         return NO_DECISION;
       case 'PostToolUseFailure':
+        this.settled(session, tool, input);
         this.change(id, (s) => {
           const full = this.tools.targetOf(tool, input, cwd);
           const target = this.tools.isFileTool(tool) ? baseName(full) : full;
@@ -294,6 +302,7 @@ export class ClaudeSource {
           s.report = reportFromMarkdown(text);
           if (text) s.say = firstWords(text);
           delete s.ask;
+          delete s.now;
         });
         return NO_DECISION;
       case 'StopFailure':
@@ -303,6 +312,7 @@ export class ClaudeSource {
           s.since = this.now();
           s.err = firstLine(str(event.error) ?? str(event.message) ?? '接口出错，停下了', 200);
           delete s.ask;
+          delete s.now;
         });
         return NO_DECISION;
       case 'SessionEnd':
@@ -351,19 +361,34 @@ export class ClaudeSource {
 
   // ---- held requests ----
 
-  private hold(session: Session, held: Omit<Held, 'finish' | 'cancelTimer'>): Promise<PostReply> {
+  private hold(session: Session, held: Omit<Held, 'finish' | 'cancelTimer'>, gone?: AbortSignal): Promise<PostReply> {
     return new Promise((resolve) => {
+      const onGone = () => this.release(session, entry, ANSWERED_THERE);
       const entry: Held = {
         ...held,
         finish: (reply) => {
           entry.cancelTimer();
+          gone?.removeEventListener('abort', onGone);
           resolve(reply);
         },
         cancelTimer: () => {},
       };
+      if (gone?.aborted) return resolve(NO_DECISION);
+      gone?.addEventListener('abort', onGone, { once: true });
       session.held.push(entry);
       if (session.held.length === 1) this.show(session);
     });
+  }
+
+  /**
+   * The agent got past a tool call that is still held for the device: someone answered
+   * it in the terminal. Agents show their own prompt while the hook waits, so this is
+   * normal; it backs up `gone` for agents that don't hang up on the hook.
+   */
+  private settled(session: Session, tool: string, input: Record<string, unknown>): void {
+    const same = JSON.stringify(input);
+    const held = session.held.find((h) => h.tool === tool && JSON.stringify(h.input) === same) ?? session.held.find((h) => h.tool === tool);
+    if (held) this.release(session, held, ANSWERED_THERE);
   }
 
   /** Put the first held request on the device and start its clock. */
@@ -420,16 +445,22 @@ export class ClaudeSource {
     for (const held of [...session.held].reverse()) this.release(session, held, why);
   }
 
-  private holdPermission(session: Session, tool: string, input: Record<string, unknown>, cwd: string | undefined): Promise<PostReply> {
+  private holdPermission(
+    session: Session,
+    tool: string,
+    input: Record<string, unknown>,
+    cwd: string | undefined,
+    gone?: AbortSignal,
+  ): Promise<PostReply> {
     if (this.hub.devices() === 0) return Promise.resolve(NO_DECISION);
     const body = this.tools.askOf(tool, input, cwd);
     const snapshot = this.hub.get(session.id);
     if (!body.why && snapshot?.say) body.why = snapshot.say;
     const req = `r${this.nextReq++}`;
-    return this.hold(session, { req, ask: { kind: 'approve', req, ...body }, tool, target: body.target, input });
+    return this.hold(session, { req, ask: { kind: 'approve', req, ...body }, tool, target: body.target, input }, gone);
   }
 
-  private holdQuestion(session: Session, input: Record<string, unknown>): Promise<PostReply> {
+  private holdQuestion(session: Session, input: Record<string, unknown>, gone?: AbortSignal): Promise<PostReply> {
     if (this.hub.devices() === 0) return Promise.resolve(NO_DECISION);
     const questions = (Array.isArray(input.questions) ? input.questions : [])
       .map(obj)
@@ -450,7 +481,7 @@ export class ClaudeSource {
       index: 0,
       answers: {},
       input,
-    });
+    }, gone);
   }
 
   private questionAsk(req: string, questions: Question[], index: number): QuestionAsk {

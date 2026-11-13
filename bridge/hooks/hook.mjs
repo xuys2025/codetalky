@@ -1,13 +1,19 @@
 #!/usr/bin/env node
-// Codex runs hooks as commands: event JSON on stdin, answer JSON on stdout. This one
+// Command hooks get the event JSON on stdin and answer with JSON on stdout. This one
 // hands the event to the CodeTalky bridge and prints its answer. If the bridge isn't
-// running it prints {} (no decision), so Codex carries on exactly as without it.
+// running it prints {} (no decision), so the agent carries on exactly as without it.
+//
+// Codex sends every event through it (its hooks can only be commands). Claude Code uses
+// HTTP hooks, except for SessionStart, which only takes commands.
+//
+//   node hook.mjs <port> [codex|claude]
 //
 // Plain JavaScript on purpose: it starts for every tool call, so no type stripping.
 import { request } from 'node:http';
 
-// The port comes as the first argument, from the hook settings `codetalky hooks --codex` wrote.
+// Both arguments come from the hook settings `codetalky hooks` wrote.
 const port = Number(process.argv[2] || process.env.CODETALKY_PORT || 8137);
+const agent = process.argv[3] === 'claude' ? 'claude' : 'codex';
 const run = process.env.CODETALKY_RUN || '';
 
 function send(body) {
@@ -16,7 +22,7 @@ function send(body) {
       {
         host: '127.0.0.1',
         port,
-        path: '/hooks/codex',
+        path: `/hooks/${agent}`,
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-codetalky-run': run },
       },
@@ -27,7 +33,7 @@ function send(body) {
         res.on('end', () => resolve(res.statusCode >= 200 && res.statusCode < 300 ? text.trim() : ''));
       },
     );
-    // A held permission request can take minutes; Codex's own hook timeout decides.
+    // A held permission request can take minutes; the agent's own hook timeout decides.
     req.setTimeout(0);
     req.on('error', () => resolve(''));
     req.end(body);

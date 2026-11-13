@@ -10,6 +10,7 @@
 //   node src/main.ts hooks --merge F    add them to settings file F (backup first)
 //   node src/main.ts hooks --remove F   take them out again
 
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
@@ -139,13 +140,17 @@ function main(): void {
   if (command === 'hooks') {
     if (rest.length > 0) fail(`unexpected ${rest.join(' ')}`);
     const set = args.codex ? codexHooks(port, hold) : claudeHooks(port, hold);
+    // PowerShell and cmd hand "~/.claude/settings.json" over as is.
+    const home = (file: string) => file.replace(/^~(?=$|[\\/])/, homedir());
     if (args.merge) {
-      const backup = mergeHooks(args.merge, set);
-      console.log(`added CodeTalky hooks to ${args.merge}${backup ? ` (old file kept as ${backup})` : ''}`);
+      const file = home(args.merge);
+      const backup = mergeHooks(file, set);
+      console.log(`added CodeTalky hooks to ${file}${backup ? ` (old file kept as ${backup})` : ''}`);
       if (args.codex) console.log('Codex runs new hooks only after you trust them: start codex and type /hooks once.');
     } else if (args.remove) {
-      const backup = removeHooks(args.remove, set);
-      console.log(backup ? `removed CodeTalky hooks from ${args.remove} (old file kept as ${backup})` : `no CodeTalky hooks in ${args.remove}`);
+      const file = home(args.remove);
+      const backup = removeHooks(file, set);
+      console.log(backup ? `removed CodeTalky hooks from ${file} (old file kept as ${backup})` : `no CodeTalky hooks in ${file}`);
     } else {
       console.log(JSON.stringify({ hooks: set.hooks }, null, 2));
     }
@@ -188,8 +193,8 @@ function serve(o: ServeOptions): void {
     port: o.port,
     simDir,
     post: {
-      '/hooks/claude': (body, headers) => claude.handle(body, headers),
-      '/hooks/codex': (body, headers) => codex.handle(body, headers),
+      '/hooks/claude': (body, headers, gone) => claude.handle(body, headers, gone),
+      '/hooks/codex': (body, headers, gone) => codex.handle(body, headers, gone),
       '/pairing': (body) => Promise.resolve(pairingControl(pairing, body)),
     },
     runs,

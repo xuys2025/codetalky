@@ -122,7 +122,7 @@ node src/main.ts --fake                                  # 起服务（--fake �
 node src/main.ts hooks --remove ~/.claude/settings.json  # 不用了就撤掉
 ```
 
-钩子是 Claude Code 自带的 HTTP 钩子，发到 `http://127.0.0.1:8137/hooks/claude`。服务没开时 Claude Code 照常工作，钩子连不上不会拦它。我没有改你的 `~/.claude/settings.json`，要不要加由你决定。
+钩子是 Claude Code 自带的 HTTP 钩子，发到 `http://127.0.0.1:8137/hooks/claude`。只有 SessionStart 例外：Claude Code 规定它只能是命令型钩子，所以用转发脚本 `bridge/hooks/hook.mjs`（和 Codex 共用）。服务没开时 Claude Code 照常工作，钩子连不上不会拦它。我没有改你的 `~/.claude/settings.json`，要不要加由你决定。
 
 怎么工作的（`bridge/src/claude/`）：
 
@@ -130,7 +130,10 @@ node src/main.ts hooks --remove ~/.claude/settings.json  # 不用了就撤掉
 - 你每发一条指令开始新的一轮：计数、改动文件、改动片段清零；活动记录保留。
 - 每一步工具调用记一条：读了多少行、搜到几处、改了几行（用 Claude Code 自己的补丁，改动片段带真实行号）、命令完成或失败。待办列表来自它的 TodoWrite。
 - 完成汇报用它最后一段回复，Markdown 的要点、加粗开头会变成汇报里的圆点和粗体。
-- 批准请求：设备连着时，钩子等设备回话，期限默认 570 秒（`--hold` 可改）。期限到了、设备断了、或者根本没设备连着，钩子不给结论，Claude Code 就在终端里照常问你。注意：钩子在等设备的时候，终端里看不到确认框。
+- 批准请求：设备连着时，钩子等设备回话，期限默认 570 秒（`--hold` 可改）。交互式 Claude Code（2.1.323 实测）在钩子等待的同时，终端里也照常弹确认框，两边谁先答算谁的：
+  - 设备先答，终端的确认框自己消失，接着干活；
+  - 终端先答，Claude Code 挂断钩子请求，设备马上离开批准页，显示“已在电脑上处理”（万一没挂断，看到这个工具的结果也会离开）；
+  - 期限到了、设备断了、或者根本没设备连着，钩子不给结论，终端的确认框还在，照常在电脑上答。
 - 改文件的请求在设备上显示要改的行，会去文件里找出第几行；命令显示整条，理由用命令自带的说明。删除、推送、强推、`reset --hard` 这类命令要长按批准。
 - 同时来的几个请求排队，一个一个显示。
 - 它用 AskUserQuestion 提问时，在设备上点选项回答；一次问几道题就依次显示。
@@ -142,6 +145,14 @@ node src/main.ts hooks --remove ~/.claude/settings.json  # 不用了就撤掉
 - `claude -p` 让它跑一条命令：设备上出现等批准，点批准后命令真的执行了。
 - `claude -p` 让它改一个文件：设备上看到要改的行，批准后改动片段和 Claude Code 的补丁一致，完成汇报的要点正确。
 - 交互式 Claude Code（用 pywinpty 开的伪终端）让它用 AskUserQuestion 提问：设备上点了选项，终端里显示收到了答案，它的回复里说的就是这个选项。`claude -p` 模式里没有 AskUserQuestion，只能这样测。
+- 11-13 托管终端整套（`codetalky claude --model haiku --permission-mode default`，测试脚本同时扮演设备和坐在终端前的人，终端画面用 xterm 无头终端截下来）：
+  - 启动 3 秒设备上就出现会话，能发指令；中文指令打进输入框并提交了。
+  - 第 1 个批准在设备上点：155 毫秒后 Claude Code 继续。
+  - 它正忙时设备发第 2 条指令：Claude Code 排进队里，做完手上这步就接着做。
+  - 第 2 个批准在终端里按回车：0.5 秒后设备离开批准页。
+  - 第 3 个批准谁都不答：20 秒（测试时把期限调短了）后设备放手，终端确认框还在，回车后照常完成。
+  - 发现并改掉的问题：SessionStart 不收 HTTP 钩子，会话要等第一条指令才出现，设备没法发第一条（改成命令型）；终端里答了，设备还停在批准页（改成跟着挂断走）；命令前面的 `cd "项目目录" &&` 挤掉了命令本身（是本项目目录就不显示）；读一行的文件显示“2 行”；完成后“正在做”没清；新一轮还显示上一轮汇报的话。
+  - 你的 Claude Code 默认是 auto 模式，大部分操作它自己放行，不会来问设备；测试时用 `--permission-mode default` 强制每步都问。
 
 安全：
 
@@ -150,11 +161,8 @@ node src/main.ts hooks --remove ~/.claude/settings.json  # 不用了就撤掉
 
 还没做的：
 
-- 给普通终端里的会话发新指令：要做托管终端（`codetalky claude` 在伪终端里启动 Claude Code，设备的指令写进去）。这次测试证明 pywinpty（Windows 的 ConPTY）在这台机器上能用。
 - 计划确认（ExitPlanMode）还是在终端里确认，设备上不显示计划。
 - 多选题在设备上只能选一个；不能自己写答案。
-- Codex 还没接。
-- 配对口令。
 
 ## 多台电脑（你 11-13 提的要求，已完成）
 
@@ -192,10 +200,12 @@ node src/main.ts hooks --remove ~/.claude/settings.json  # 不用了就撤掉
    - 语音确认里的文字是写死的（第 3 阶段接豆包后才有真的）。
 7. （已做）接 Claude Code 的钩子，跑通真实的批准闭环（第 2 阶段）。
 8. （已做）在 WSL 里装 ESP-IDF v5.5.4，官方固件原样编译通过（`Metalio-E-Ink4.bin`，4.16 MB）。脚本 `tools/esp/install-idf.sh` 可重跑：Python 3.12 用 uv 装（系统的 3.14 太新）；ESP-IDF 和工具链都从乐鑫镜像 dl.espressif.com 下载，不用代理；openocd 缺的 libusb 不用 sudo，下载 Ubuntu 的包解压到 `~/esp/libusb`；官方资源打包要的 qoi-conv 预先装好。官方仓库在 WSL 里重新克隆到 `~/work/metalio`，符号链接才是真的。
-9. （已做，待真实测试）托管终端：`codetalky claude` 在伪终端里启动 Claude Code（node-pty 的预编译版 `@lydell/node-pty`，Windows 上走 ConPTY），你照常用。启动时生成一个运行标记放进环境变量 `CODETALKY_RUN`，钩子把它放在请求头里带回来，电脑端服务就知道这个会话是托管的，设备上的“发指令”“回复”随之打开。设备发来的指令合成一行，先输入文字，停 150 毫秒再按回车（免得被当成粘贴）。启动器退出后“发指令”自动关掉；电脑端服务重启后启动器 3 秒内自动重连。用假的命令行程序测过整条链路，真 Claude Code 还没测。
-10. （已做，待真实测试）接 Codex。本机是 Codex CLI 0.136，钩子功能已经是稳定版。和 Claude Code 的区别：
-    - 钩子只能是命令，没有 HTTP 型，所以用一个转发脚本 `bridge/hooks/codex-hook.mjs` 把事件交给电脑端服务（`/hooks/codex`），再把答复打印回去；电脑端没开时打印 `{}`，Codex 照常问你。脚本用 `node:http` 而不是 `fetch`，因为 `fetch` 等响应头最多 300 秒，批准要等更久。
-    - 新钩子要先信任：合并配置后启动 codex，输入 `/hooks` 信任一次。有个每次跳过信任的启动参数，但会连别的钩子一起放行，我没用。
+9. （已做，11-13 真 Claude Code 实测通过，见上面第 7 项的实测记录）托管终端：`codetalky claude` 在伪终端里启动 Claude Code（node-pty 的预编译版 `@lydell/node-pty`，Windows 上走 ConPTY），你照常用。启动时生成一个运行标记放进环境变量 `CODETALKY_RUN`，钩子把它放在请求头里带回来，电脑端服务就知道这个会话是托管的，设备上的“发指令”“回复”随之打开。设备发来的指令合成一行，先输入文字，停 150 毫秒再按回车（免得被当成粘贴）。启动器退出后“发指令”自动关掉；电脑端服务重启后启动器 3 秒内自动重连。用假的命令行程序测过整条链路，真 Claude Code 还没测。
+10. （已做，待真实测试）接 Codex。本机的 Codex CLI 11-13 从 0.136 升到了 0.169（当时的最新版），用 ChatGPT 账号登录，`codex doctor` 检查全部正常；钩子功能是稳定版，默认开着。和 Claude Code 的区别：
+    - 钩子只能是命令，没有 HTTP 型，所以用一个转发脚本 `bridge/hooks/hook.mjs` 把事件交给电脑端服务（`/hooks/codex`），再把答复打印回去；电脑端没开时打印 `{}`，Codex 照常问你。脚本用 `node:http` 而不是 `fetch`，因为 `fetch` 等响应头最多 300 秒，批准要等更久。
+    - 新钩子要先信任：合并配置后启动 codex，输入 `/hooks` 信任一次。有个每次跳过信任的启动参数（`--dangerously-bypass-hook-trust`），会连别的钩子一起放行，不用。
+    - `~/.codex/` 是 Codex 命令行和桌面版共用的，文档说桌面版的设置里也能信任钩子。所以钩子加进 `~/.codex/hooks.json`（并信任）以后，桌面版里的会话应该也会出现在设备上、能在设备上批准，但不能从设备发指令（那要托管终端）。还没实测。
+    - `codetalky codex` 启动时直接用 node 跑 npm 装的 `codex.js`，不经过 cmd.exe，参数里有 `&`、引号也不会被改。
     - 改文件走 `apply_patch`，一次可以改好几个文件，补丁是它自己的格式，已写了解析（`bridge/src/codex/patch.ts`），行号到文件里找；命令失败看退出码。
     - 模型名直接在事件里；分支直接读项目的 `.git/HEAD`（Claude 也用上了）。
     - 文档没说钩子能不能回答 Codex 的提问，所以 Codex 先只做批准，不做提问。
@@ -216,11 +226,14 @@ node src/main.ts hooks --remove ~/.claude/settings.json  # 不用了就撤掉
 
 ## 最后一起跑的真实测试（花额度，攒到最后一起做）
 
-你说过要花额度的测试留到最后一起安排。都用最便宜的 haiku，在临时目录里跑：
+你说过要花额度的测试留到最后一起安排。
 
-1. 托管终端 + 真 Claude Code：钩子能不能把 `CODETALKY_RUN` 放进请求头（文档说支持，没实测）；设备发的指令能不能打进 Claude Code 的输入框并提交（粘贴检测、回车时机）；它正忙时发指令是否排队。
-2. 交互式会话里的批准：终端在等设备时是什么样子，设备批准后终端是否立刻继续，期限到了是否照常弹确认框。之前只在 `claude -p` 里测过批准，交互式只测过提问。
-3. Codex：合并钩子配置并在 `/hooks` 里信任后，钩子是否真的跑（Windows 上命令用什么 shell 执行）；批准请求能否在设备上回答；`apply_patch` 的改动显示是否正确；`codetalky codex` 能否打字进去。
+1. （11-13 通过）托管终端 + 真 Claude Code。
+2. （11-13 通过）交互式会话里的批准：设备批准、终端里答、谁都不答三种都测了。
+3. Codex：还要你动手两步才能测。加钩子是改你的全局配置（桌面版也读），我这边的权限检查不让我自己改；跳过信任的启动参数也被拦了。要你做的：
+   - 合并钩子：`cd D:\CodeTalky\bridge` 后运行 `node src/main.ts hooks --codex --merge $HOME\.codex\hooks.json`（文件原来不存在，撤掉用 `--remove`）。
+   - 在测试目录里开一次 codex：信任这个目录，再输入 `/hooks` 把 CodeTalky 的 7 个钩子都信任，然后 `/quit`。
+   之后我用 `codetalky codex -m gpt-6-luna -c model_reasoning_effort="low" -s read-only -a on-request` 跑和 Claude 一样的脚本（只读沙盒让每次写文件都要批准）。测试脚本在临时目录 `scratchpad/e2e/live.mjs`。
 4. 多台电脑的真实场景：要第二台电脑，需要你来配合。
 
 ## 常用命令

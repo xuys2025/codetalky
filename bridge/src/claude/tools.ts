@@ -53,12 +53,32 @@ const oneLine = (s: string, max = 200) => {
   return line.length > max ? `${line.slice(0, max)}…` : line;
 };
 
+const CD = /^\s*cd\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s*(?:&&|;)\s*/;
+const normDir = (p: string) => {
+  // Git Bash spells C:\x as /c/x.
+  const d = p.replace(/\\/g, '/').replace(/^\/([a-zA-Z])(\/|$)/, '$1:/').replace(/\/+$/, '');
+  return /^[a-zA-Z]:/.test(d) ? d.toLowerCase() : d;
+};
+
+/**
+ * Claude Code often starts a command with `cd "<project>" &&`. On a one-line screen
+ * that shows only the path, so drop it when it is the session's own directory.
+ */
+export function dropCd(command: string, cwd: string | undefined): string {
+  const m = CD.exec(command);
+  if (!m || !cwd) return command;
+  const dir = m[1] ?? m[2] ?? m[3] ?? '';
+  const rest = command.slice(m[0].length);
+  return rest && normDir(dir) === normDir(cwd) ? rest : command;
+}
+
 /** What the tool works on: a file, a command, a pattern, a URL. */
 export function targetOf(tool: string, input: Input, cwd: string | undefined): string {
   const path = str(input.file_path) ?? str(input.notebook_path) ?? str(input.path);
   if (isFileTool(tool) && path) return showPath(path, cwd);
+  const command = str(input.command);
   const pick =
-    str(input.command) ??
+    (command === undefined ? undefined : dropCd(command, cwd)) ??
     str(input.pattern) ??
     str(input.url) ??
     str(input.query) ??
@@ -137,7 +157,11 @@ export function resultOf(tool: string, input: Input, response: unknown, cwd: str
   };
   switch (tool) {
     case 'Read': {
-      const lines = num((r.file as Input | undefined)?.numLines);
+      const f = r.file as Input | undefined;
+      let lines = num(f?.numLines);
+      const content = str(f?.content);
+      // Claude Code counts the empty "line" after a final newline: "zero\n" is 2 lines to it.
+      if (lines !== undefined && content?.endsWith('\n') && content.split('\n').length === lines) lines -= 1;
       if (lines !== undefined) out.res = `${lines} 行`;
       break;
     }
