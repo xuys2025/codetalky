@@ -71,11 +71,11 @@ test('Codex tools look like Claude ones on the device', () => {
   assert.deepEqual([failed.res, failed.bad], ['退出 1', true]);
 });
 
-test('a Codex session: approval held for the device, patch recorded, report shown', async () => {
+test('a plain Codex session: it asks at the computer straight away, patch recorded, report shown', async () => {
   const clock = new ManualClock(T0 * 1000);
   const hub = new Hub(clock);
   hub.attachDevice();
-  const codex = new ClaudeSource(hub, clock, { holdSeconds: 300, log: () => {}, agent: 'codex', tools: codexTools });
+  const codex = new ClaudeSource(hub, clock, { holdSeconds: 300, log: () => {}, agent: 'codex', tools: codexTools, terminalKeys: CODEX_KEYS });
   const send = (event: string, extra: Record<string, unknown> = {}) =>
     codex.handle({ session_id: SID, cwd: tmpdir(), model: 'gpt-5.5-codex', hook_event_name: event, ...extra });
   await send('SessionStart', { source: 'startup' });
@@ -84,22 +84,18 @@ test('a Codex session: approval held for the device, patch recorded, report show
   assert.equal(s.model, 'gpt-5.5-codex');
   await send('UserPromptSubmit', { turn_id: 't1', prompt: '支持数量' });
 
-  const reply = codex.handle({
-    session_id: SID,
-    cwd: tmpdir(),
-    hook_event_name: 'PermissionRequest',
-    tool_name: 'Bash',
-    tool_input: { command: 'npm test', description: '跑测试' },
-  });
+  // Not started with codetalky: holding it would keep Codex from showing its own prompt
+  // until the device answered, so it isn't held. The device just says where it is waiting.
+  const reply = await send('PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'npm test', description: '跑测试' } });
+  assert.deepEqual(reply, { status: 200 });
   s = hub.get(SID)!;
-  assert.equal(s.state, 'approve');
-  assert.ok(s.ask?.kind === 'approve');
-  hub.act({ t: 'approve', seq: 1, id: SID, req: s.ask.req, allow: true });
-  assert.deepEqual((await reply).body, { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } });
+  assert.deepEqual([s.state, s.ask, s.say, s.now?.target], ['running', undefined, '在电脑上等你确认', 'npm test']);
+  await send('PostToolUse', { tool_name: 'Bash', tool_input: { command: 'npm test' }, tool_response: { exit_code: 0 } });
+  assert.equal(hub.get(SID)!.say, undefined, 'answered there: the note goes');
 
   await send('PostToolUse', { tool_name: 'apply_patch', tool_input: { command: PATCH }, tool_response: 'Success' });
   s = hub.get(SID)!;
-  assert.deepEqual(s.n, { read: 0, edit: 1, new: 0, cmd: 0, add: 3, del: 1 });
+  assert.deepEqual(s.n, { read: 0, edit: 1, new: 0, cmd: 1, add: 3, del: 1 });
   assert.deepEqual(
     s.files.map((f) => [f.st, f.path]),
     [
@@ -129,9 +125,10 @@ test("Codex's edits come from its session file, and apply_patch through the shel
     rollout,
     JSON.stringify({ type: 'session_meta', payload: {} }) + '\n' + item({ type: 'FileChange', id: 'old', status: 'completed', changes: { [join(dir, 'old.txt')]: { type: 'add', content: 'x\n' } } }),
   );
-  const hub = new Hub(new ManualClock(T0 * 1000));
+  const clock = new ManualClock(T0 * 1000);
+  const hub = new Hub(clock);
   hub.attachDevice();
-  const codex = new ClaudeSource(hub, new ManualClock(T0 * 1000), { holdSeconds: 300, log: () => {}, agent: 'codex', tools: codexTools });
+  const codex = new ClaudeSource(hub, clock, { holdSeconds: 300, log: () => {}, agent: 'codex', tools: codexTools });
   const send = (event: string, extra: Record<string, unknown> = {}) =>
     codex.handle({ session_id: SID, cwd: dir, transcript_path: rollout, hook_event_name: event, ...extra });
   await send('SessionStart', { source: 'startup' });
@@ -161,6 +158,15 @@ test("Codex's edits come from its session file, and apply_patch through the shel
   // If Codex ever does report the patch through PostToolUse, it isn't counted twice.
   await send('PostToolUse', { tool_name: 'apply_patch', tool_input: { command: patch.split('\n').slice(1, -1).join('\n') } });
   assert.equal(hub.get(SID)!.n.edit, 1);
+
+  // Between hooks the file is read too: what Codex says, and a turn stopped at the computer (no Stop hook for that).
+  await send('UserPromptSubmit', { prompt: '再跑个命令' });
+  appendFileSync(rollout, item({ type: 'AgentMessage', id: 'm2', content: [{ type: 'Text', text: '先看看目录。' }], phase: 'commentary' }));
+  clock.advance(2000);
+  assert.deepEqual([hub.get(SID)!.state, hub.get(SID)!.say], ['running', '先看看目录。']);
+  appendFileSync(rollout, JSON.stringify({ type: 'event_msg', payload: { type: 'turn_aborted', turn_id: 't2', reason: 'interrupted' } }) + '\n');
+  clock.advance(2000);
+  assert.deepEqual([hub.get(SID)!.state, hub.get(SID)!.say, hub.get(SID)!.now], ['idle', '在电脑上中断了，等你的下一条指令', undefined]);
   codex.stop();
 });
 

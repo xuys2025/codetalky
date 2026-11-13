@@ -70,22 +70,29 @@ export function changedFiles(changes: unknown): ChangedFile[] {
   return files;
 }
 
+/** What happened since the last look. */
+export interface RolloutNews {
+  changes: CompletedChange[];
+  /** A turn was interrupted (Esc, or no to a prompt): Codex stopped without a Stop hook. */
+  aborted: boolean;
+}
+
 export class RolloutTail extends JsonlTail {
   /** Latest thing Codex said. */
   text: string | undefined;
-  private changes: CompletedChange[] = [];
+  private news: RolloutNews = { changes: [], aborted: false };
   private primed = false;
 
-  /** Read what was appended; returns the file changes completed since last time. */
-  update(): CompletedChange[] {
+  /** Read what was appended; returns what happened since last time. */
+  update(): RolloutNews {
     this.read();
-    const out = this.changes;
-    this.changes = [];
+    const out = this.news;
+    this.news = { changes: [], aborted: false };
     // The first read catches up on history (a resumed session, or a bridge started
-    // mid-session): those changes were made before anyone was watching.
+    // mid-session): that happened before anyone was watching.
     if (!this.primed) {
       this.primed = true;
-      return [];
+      return { changes: [], aborted: false };
     }
     return out;
   }
@@ -93,6 +100,12 @@ export class RolloutTail extends JsonlTail {
   protected take(entry: Record<string, unknown>): void {
     if (entry.type !== 'event_msg') return;
     const p = obj(entry.payload);
+    if (p.type === 'turn_aborted') {
+      this.news.aborted = true;
+      return;
+    }
+    // A later turn started: an earlier interruption is old news.
+    if (p.type === 'task_started') this.news.aborted = false;
     if (p.type !== 'item_completed') return;
     const item = obj(p.item);
     if (item.type === 'AgentMessage' && Array.isArray(item.content)) {
@@ -104,7 +117,7 @@ export class RolloutTail extends JsonlTail {
       if (text) this.text = text;
     } else if (item.type === 'FileChange' && item.status === 'completed') {
       const files = changedFiles(item.changes);
-      if (files.length > 0) this.changes.push({ id: str(item.id) ?? '', files });
+      if (files.length > 0) this.news.changes.push({ id: str(item.id) ?? '', files });
     }
   }
 }

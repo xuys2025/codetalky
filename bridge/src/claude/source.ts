@@ -64,6 +64,12 @@ const SWEEP_EVERY_MS = 10 * 60 * 1000;
 const NO_DECISION: PostReply = { status: 200 };
 /** What the device says when a held request was answered at the computer instead. */
 const ANSWERED_THERE = '已在电脑上处理';
+/** What the device says while the agent asks at the computer and the device can't answer. */
+const WAITING_THERE = '在电脑上等你确认';
+/** Codex stopped a turn without a Stop hook (Esc, or no to its prompt). */
+const STOPPED_THERE = '在电脑上中断了，等你的下一条指令';
+/** How often a working Codex session's file is read between hooks. */
+const POLL_MS = 2000;
 
 type Event = Record<string, unknown> & { session_id: string; hook_event_name: string };
 
@@ -108,6 +114,7 @@ interface Session {
   /** Codex: its session file, for file changes and what it says. */
   rollout: RolloutTail | null;
   lastText: string | undefined;
+  cwd: string | undefined;
   lastEvent: number;
   held: Held[];
   /** Claude Code has exited; kept only until its report has been seen. */
@@ -135,6 +142,7 @@ export class ClaudeSource {
   private readonly aliases = new Map<string, string>();
   private nextReq = 1;
   private cancelSweep: () => void;
+  private cancelPoll: () => void = () => {};
   private readonly unsubscribe: () => void;
   private readonly unsubscribeRuns: () => void;
 
@@ -145,6 +153,7 @@ export class ClaudeSource {
     this.agent = options.agent ?? 'claude';
     this.tools = options.tools ?? claudeTools;
     this.cancelSweep = this.scheduleSweep();
+    if (this.agent === 'codex') this.cancelPoll = this.schedulePoll();
     this.unsubscribe = hub.subscribe((event) => {
       // The last device left: give every held request back to the terminal.
       if (event.type === 'devices' && hub.devices() === 0) {
@@ -192,6 +201,7 @@ export class ClaudeSource {
       tail: null,
       rollout: null,
       lastText: undefined,
+      cwd: cwd || undefined,
       lastEvent: this.now(),
       held: [],
       ended: false,
@@ -238,6 +248,7 @@ export class ClaudeSource {
 
   stop(): void {
     this.cancelSweep();
+    this.cancelPoll();
     this.unsubscribe();
     this.unsubscribeRuns();
     for (const session of this.sessions.values()) this.releaseAll(session, '');
@@ -311,6 +322,7 @@ export class ClaudeSource {
         tail: null,
         rollout: null,
         lastText: undefined,
+        cwd,
         lastEvent: this.now(),
         held: [],
         ended: false,
@@ -322,24 +334,44 @@ export class ClaudeSource {
       this.options.log(`${this.agent} session ${id.slice(0, 8)} in ${cwd ?? '?'}`);
     }
     this.attach(session, transcript);
+    if (cwd) session.cwd = cwd;
     session.lastEvent = this.now();
     if (run !== session.token) this.setToken(session, run);
-    // What hooks don't say: model, branch, the latest thing the agent wrote, and for
-    // Codex the files apply_patch changed.
+    // What hooks don't say: model, branch and the latest thing Claude wrote.
     const state = session.tail?.update();
-    const changes = session.rollout?.update() ?? [];
-    const text = state?.text ?? session.rollout?.text;
     this.change(id, (s) => {
       const model = str(event.model) ?? state?.model;
       if (model) s.model = shortModel(model);
       if (state?.branch) s.branch = state.branch;
+      if (state?.text && state.text !== session.lastText) {
+        session.lastText = state.text;
+        s.say = firstWords(state.text);
+      }
+    });
+    this.readRollout(session);
+    return session;
+  }
+
+  /** Codex: what its session file says happened since the last look (also read between hooks). */
+  private readRollout(session: Session): void {
+    if (!session.rollout) return;
+    const news = session.rollout.update();
+    const text = session.rollout.text;
+    // A turn stopped without a Stop hook: no prompt of it is up any more.
+    if (news.aborted) for (const held of session.held.filter((h) => h.viaKeys).reverse()) this.release(session, held, '');
+    this.change(session.id, (s) => {
       if (text && text !== session.lastText) {
         session.lastText = text;
         s.say = firstWords(text);
       }
-      for (const change of changes) this.recordChange(s, change, cwd);
+      for (const change of news.changes) this.recordChange(s, change, session.cwd);
+      if (news.aborted && (s.state === 'running' || s.state === 'approve')) {
+        s.state = 'idle';
+        s.since = this.now();
+        delete s.now;
+        s.say = STOPPED_THERE;
+      }
     });
-    return session;
   }
 
   private async dispatch(event: Event, run: string | null, gone?: AbortSignal): Promise<PostReply> {
@@ -370,6 +402,7 @@ export class ClaudeSource {
             delete s.now;
             delete s.say; // the last report's words; new ones come from the transcript
           }
+          if (s.say === WAITING_THERE) delete s.say;
           this.log(s, { verb: '你', target: firstLine(str(event.prompt) ?? '') });
         });
         return NO_DECISION;
@@ -382,6 +415,7 @@ export class ClaudeSource {
             s.state = 'running';
             s.since = this.now();
           }
+          if (s.say === WAITING_THERE) delete s.say;
           if (tool === 'TodoWrite') {
             const todos = todosFrom(input);
             if (todos) s.todos = todos;
@@ -395,14 +429,18 @@ export class ClaudeSource {
         return this.holdPermission(session, tool, input, cwd, gone);
       case 'PostToolUse':
         this.settled(session, tool, input);
-        if (tool === 'TodoWrite' || tool === 'AskUserQuestion') return NO_DECISION;
-        // Codex's session file has its file changes, with the exact diff.
-        if (session.rollout && this.tools.isFileTool(tool)) return NO_DECISION;
-        this.change(id, (s) => this.record(s, tool, input, event.tool_response, cwd));
+        this.change(id, (s) => {
+          if (s.say === WAITING_THERE) delete s.say;
+          if (tool === 'TodoWrite' || tool === 'AskUserQuestion') return;
+          // Codex's session file has its file changes, with the exact diff.
+          if (session.rollout && this.tools.isFileTool(tool)) return;
+          this.record(s, tool, input, event.tool_response, cwd);
+        });
         return NO_DECISION;
       case 'PostToolUseFailure':
         this.settled(session, tool, input);
         this.change(id, (s) => {
+          if (s.say === WAITING_THERE) delete s.say;
           const full = this.tools.targetOf(tool, input, cwd);
           const target = this.tools.isFileTool(tool) ? baseName(full) : full;
           this.log(s, { verb: this.tools.verbOf(tool), target, res: event.is_interrupt === true ? '中断' : '失败', bad: true });
@@ -411,7 +449,7 @@ export class ClaudeSource {
       case 'Notification':
         if (event.notification_type === 'permission_prompt' && session.held.length === 0) {
           this.change(id, (s) => {
-            s.say = '在电脑终端里等你确认';
+            s.say = WAITING_THERE;
           });
         }
         return NO_DECISION;
@@ -470,6 +508,7 @@ export class ClaudeSource {
     this.keep(s, 'apply_patch', target, result);
     // It is done: if it is still what the session shows as running, it isn't any more.
     if (s.now?.verb === 'Edit' && s.state === 'running') delete s.now;
+    if (s.say === WAITING_THERE) delete s.say;
   }
 
   private keep(s: SessionSnapshot, tool: string, target: string, result: ToolResult): void {
@@ -600,13 +639,25 @@ export class ClaudeSource {
     cwd: string | undefined,
     gone?: AbortSignal,
   ): Promise<PostReply> {
+    const managed = session.token !== null && (this.options.runs?.has(session.token) ?? false);
+    if (this.options.terminalKeys && !managed) {
+      // This agent can't show its own prompt while a hook waits, and this session wasn't
+      // started with codetalky, so the device couldn't answer it without holding up the
+      // computer. It asks at the computer straight away; the device only says so.
+      const body = this.tools.askOf(tool, input, cwd);
+      this.change(session.id, (s) => {
+        s.now = { verb: body.verb, target: body.target, add: body.add, del: body.del };
+        s.say = WAITING_THERE;
+      });
+      return Promise.resolve(NO_DECISION);
+    }
     if (this.hub.devices() === 0) return Promise.resolve(NO_DECISION);
     const body = this.tools.askOf(tool, input, cwd);
     const snapshot = this.hub.get(session.id);
     if (!body.why && snapshot?.say) body.why = snapshot.say;
     const req = `r${this.nextReq++}`;
     const held = { req, ask: { kind: 'approve', req, ...body } as ApproveAsk, tool, target: body.target, input };
-    if (this.options.terminalKeys && session.token && this.options.runs?.has(session.token)) {
+    if (this.options.terminalKeys) {
       // The agent would not draw its own prompt while this hook waits. Let it draw it
       // now; the device answers it by pressing keys in the terminal.
       void this.hold(session, { ...held, viaKeys: true });
@@ -669,7 +720,7 @@ export class ClaudeSource {
         this.change(id, (s) => {
           if (!ok) {
             s.say = '终端里已经没有这个确认框了，没有按';
-          } else if (!allow && s.state === 'running' && session.held.length === 0) {
+          } else if (!allow && (s.state === 'running' || s.state === 'idle') && session.held.length === 0) {
             // Saying no to its prompt stops the turn; it waits for the next instruction (and fires no Stop).
             s.state = 'idle';
             s.since = this.now();
@@ -740,6 +791,17 @@ export class ClaudeSource {
         if (session.lastEvent < cutoff && session.held.length === 0) this.forget(id);
       }
       this.cancelSweep = this.scheduleSweep();
+    });
+  }
+
+  /** Codex: while a session works, read its file between hooks too (what it says, an interrupted turn). */
+  private schedulePoll(): () => void {
+    return this.clock.after(POLL_MS, () => {
+      for (const session of this.sessions.values()) {
+        const state = this.hub.get(session.id)?.state;
+        if (state === 'running' || state === 'approve') this.readRollout(session);
+      }
+      this.cancelPoll = this.schedulePoll();
     });
   }
 }
