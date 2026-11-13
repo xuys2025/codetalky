@@ -31,6 +31,8 @@ function setup() {
   const hub = new Hub(clock);
   const out: ToDevice[] = [];
   const link = new DeviceLink(hub, clock, (text) => out.push(JSON.parse(text) as ToDevice), {
+    hostName: '台式机',
+    hostId: 'host-1',
     quick: ['继续下一步'],
     tzMinutes: 480,
     flushMs: 150,
@@ -48,7 +50,7 @@ test('hello is answered with time, every session, then ready', () => {
   assert.equal(link.receive(hello), true);
   assert.equal(link.device, 'test');
   assert.deepEqual(kinds(out), ['hello', 'session a', 'session b', 'ready']);
-  assert.deepEqual(out[0], { t: 'hello', proto: 1, time: T0, tz: 480, quick: ['继续下一步'] });
+  assert.deepEqual(out[0], { t: 'hello', proto: 1, host: '台式机', hostId: 'host-1', time: T0, tz: 480, quick: ['继续下一步'] });
 });
 
 test('a device speaking another protocol version is dropped', () => {

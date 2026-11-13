@@ -30,11 +30,12 @@ void ct_ui_init(void);
 /* A key went down or up. */
 void ct_ui_on_key(ct_key_t key, bool down);
 
-/* The connection to the bridge came up or went down. */
-void ct_ui_on_link(bool up);
+/* The connection to a computer's bridge came up or went down. Links are numbered
+ * 0 .. CT_MAX_LINKS-1 by the platform, one per computer the device knows. */
+void ct_ui_on_link(int link, bool up);
 
-/* One text frame from the bridge. Call from the UI thread, not from inside LVGL. */
-void ct_ui_on_message(const char *json, size_t len);
+/* One text frame from a bridge. Call from the UI thread, not from inside LVGL. */
+void ct_ui_on_message(int link, const char *json, size_t len);
 
 #ifdef __cplusplus
 }

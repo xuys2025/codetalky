@@ -30,9 +30,9 @@ EM_JS(void, js_on_vibrate, (int ms), {
     if (Module.onVibrate) Module.onVibrate(ms);
 });
 
-/* Returns 1 if the page took the frame (its WebSocket is open). */
-EM_JS(int, js_net_send, (const char *json), {
-    return Module.onNetSend ? (Module.onNetSend(UTF8ToString(json)) ? 1 : 0) : 0;
+/* Returns 1 if the page took the frame (that link's WebSocket is open). */
+EM_JS(int, js_net_send, (int link, const char *json), {
+    return Module.onNetSend ? (Module.onNetSend(link, UTF8ToString(json)) ? 1 : 0) : 0;
 });
 
 void ct_hal_refresh_hint(ct_refresh_t mode) {
@@ -46,8 +46,8 @@ void ct_hal_vibrate(uint16_t ms) {
     js_on_vibrate(ms);
 }
 
-bool ct_hal_net_send(const char *json) {
-    return js_net_send(json) != 0;
+bool ct_hal_net_send(int link, const char *json) {
+    return js_net_send(link, json) != 0;
 }
 
 int ct_hal_battery_percent(void) {
@@ -114,17 +114,17 @@ void sim_key(int key, int down) {
     }
 }
 
-/* The page's WebSocket to the bridge opened (1) or closed (0). */
+/* The page's WebSocket to one computer's bridge opened (1) or closed (0). */
 EMSCRIPTEN_KEEPALIVE
-void sim_net_link(int up) {
-    ct_ui_on_link(up != 0);
+void sim_net_link(int link, int up) {
+    ct_ui_on_link(link, up != 0);
 }
 
-/* One text frame from the bridge, UTF-8, len bytes (no terminator needed). */
+/* One text frame from a bridge, UTF-8, len bytes (no terminator needed). */
 EMSCRIPTEN_KEEPALIVE
-void sim_net_rx(const char *json, int len) {
+void sim_net_rx(int link, const char *json, int len) {
     if (json != NULL && len > 0) {
-        ct_ui_on_message(json, (size_t)len);
+        ct_ui_on_message(link, json, (size_t)len);
     }
 }
 

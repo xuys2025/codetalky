@@ -6,6 +6,10 @@ import type { Hub } from './hub.ts';
 import { LIMITS, PROTO, parseFromDevice, type SessionSnapshot, type ToDevice } from './protocol.ts';
 
 export interface LinkOptions {
+  /** This computer's name on the device, e.g. "台式机". */
+  hostName: string;
+  /** Stable id of this bridge install, so the device knows it across restarts. */
+  hostId: string;
   /** One-tap replies offered on the device. */
   quick: string[];
   /** Minutes ahead of UTC, for the device's clock. */
@@ -82,6 +86,8 @@ export class DeviceLink {
     this.send({
       t: 'hello',
       proto: PROTO,
+      host: this.options.hostName,
+      hostId: this.options.hostId,
       time: this.hub.nowSeconds(),
       tz: this.options.tzMinutes,
       quick: this.options.quick,

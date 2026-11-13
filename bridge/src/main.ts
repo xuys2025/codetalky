@@ -1,6 +1,8 @@
 // codetalky-bridge: the PC side. Serves devices on ws://<host>:<port>/device, takes
 // Claude Code hook events on http://127.0.0.1:<port>/hooks/claude and, on the same
-// port, serves the browser simulator.
+// port, serves the browser simulator. Run one on every computer whose agents the
+// device should see; the device connects to each and shows which computer a session
+// is on.
 //
 //   node src/main.ts                    real Claude Code sessions (through hooks)
 //   node src/main.ts --fake             plus six scripted demo sessions
@@ -17,30 +19,45 @@ import { fastClock, realClock } from './clock.ts';
 import { FakeAgent } from './fake/engine.ts';
 import { demoScripts } from './fake/scenario.ts';
 import { Hub } from './hub.ts';
+import { bridgeId, defaultName } from './identity.ts';
 import { DEFAULT_QUICK } from './link.ts';
 import { startServer } from './server.ts';
 
-const USAGE = `usage: node src/main.ts [--fake] [--speed N] [--hold S] [--host H] [--port P] [--no-sim]
+const USAGE = `usage: node src/main.ts [--name N] [--fake] [--fake-only IDS] [--speed N] [--hold S]
+                        [--host H] [--port P] [--no-sim] [--insecure-lan]
        node src/main.ts hooks [--merge FILE | --remove FILE] [--port P] [--hold S]
 
-  --fake         also run six scripted demo sessions
-  --speed N      run the demo sessions N times faster (default 1)
-  --hold S       how long a permission request or question waits for the device
-                 before Claude Code asks in the terminal instead (default 570 seconds)
-  --host H       address to listen on (default 127.0.0.1)
-  --port P       port (default 8137)
-  --no-sim       do not serve the browser simulator
-  --insecure-lan let devices connect from other machines. There is no pairing yet:
-                 anyone on the network could approve on your behalf. Testing only.
+  --name N        this computer's name on the device, e.g. 台式机 (default: the computer name)
+  --fake          also run six scripted demo sessions
+  --fake-only IDS run only these demo sessions, e.g. codetalky,firmware
+  --speed N       run the demo sessions N times faster (default 1)
+  --hold S        how long a permission request or question waits for the device
+                  before Claude Code asks in the terminal instead (default 570 seconds)
+  --host H        address to listen on (default 127.0.0.1)
+  --port P        port (default 8137)
+  --no-sim        do not serve the browser simulator
+  --insecure-lan  let devices connect from other machines. There is no pairing yet:
+                  anyone on the network could approve on your behalf. Testing only.
 
-  hooks          print hook settings that send Claude Code's events to the bridge
-  --merge FILE   add them to a Claude Code settings file, e.g. ~/.claude/settings.json
-                 (a copy of the old file is kept as FILE.codetalky.bak)
-  --remove FILE  take them out of that file again`;
+  hooks           print hook settings that send Claude Code's events to the bridge
+  --merge FILE    add them to a Claude Code settings file, e.g. ~/.claude/settings.json
+                  (a copy of the old file is kept as FILE.codetalky.bak)
+  --remove FILE   take them out of that file again`;
 
 function fail(message: string): never {
   console.error(`${message}\n\n${USAGE}`);
   process.exit(2);
+}
+
+interface ServeOptions {
+  name: string;
+  fake: string[] | null;
+  speed: number;
+  hold: number;
+  host: string;
+  port: number;
+  sim: boolean;
+  insecureLan: boolean;
 }
 
 function main(): void {
@@ -49,7 +66,9 @@ function main(): void {
     parsed = parseArgs({
       allowPositionals: true,
       options: {
+        name: { type: 'string' },
         fake: { type: 'boolean', default: false },
+        'fake-only': { type: 'string' },
         speed: { type: 'string', default: '1' },
         hold: { type: 'string', default: '570' },
         host: { type: 'string', default: '127.0.0.1' },
@@ -89,39 +108,49 @@ function main(): void {
     return;
   }
   if (command !== undefined) fail(`unknown command ${command}`);
-  serve(args, { speed, hold, port });
+  const only = args['fake-only'];
+  serve({
+    name: (args.name ?? defaultName()).trim() || defaultName(),
+    fake: only ? only.split(',').map((s) => s.trim()).filter(Boolean) : args.fake ? [] : null,
+    speed,
+    hold,
+    host: args.host,
+    port,
+    sim: !args['no-sim'],
+    insecureLan: args['insecure-lan'],
+  });
 }
 
-function serve(
-  args: { fake: boolean; host: string; 'no-sim': boolean; 'insecure-lan': boolean },
-  n: { speed: number; hold: number; port: number },
-): void {
+function serve(o: ServeOptions): void {
   const log = (line: string) => console.log(`[${new Date().toTimeString().slice(0, 8)}] ${line}`);
   const hub = new Hub(realClock);
-  const claude = new ClaudeSource(hub, realClock, { holdSeconds: n.hold, log });
-  const demoClock = n.speed === 1 ? realClock : fastClock(n.speed);
-  const agents = args.fake ? demoScripts().map((script) => new FakeAgent(hub, demoClock, script)) : [];
-  const simDir = args['no-sim'] ? null : fileURLToPath(new URL('../../simulator/web/', import.meta.url));
+  const claude = new ClaudeSource(hub, realClock, { holdSeconds: o.hold, log });
+  const demoClock = o.speed === 1 ? realClock : fastClock(o.speed);
+  const scripts = o.fake === null ? [] : demoScripts().filter((s) => o.fake!.length === 0 || o.fake!.includes(s.initial(0).id));
+  const agents = scripts.map((script) => new FakeAgent(hub, demoClock, script));
+  const simDir = o.sim ? fileURLToPath(new URL('../../simulator/web/', import.meta.url)) : null;
 
   startServer(hub, realClock, {
-    host: args.host,
-    port: n.port,
+    host: o.host,
+    port: o.port,
     simDir,
     post: { '/hooks/claude': (body) => claude.handle(body) },
-    allowRemoteDevices: args['insecure-lan'],
+    allowRemoteDevices: o.insecureLan,
+    hostName: o.name,
+    hostId: bridgeId(o.port),
     quick: DEFAULT_QUICK,
     tzMinutes: -new Date().getTimezoneOffset(),
     flushMs: 150,
     log,
   }).then(
     (server) => {
-      console.log(`CodeTalky bridge on ws://${args.host}:${server.port}/device`);
+      console.log(`CodeTalky bridge "${o.name}" on ws://${o.host}:${server.port}/device`);
       console.log(`Claude Code hooks: http://127.0.0.1:${server.port}/hooks/claude (set up with: node src/main.ts hooks)`);
-      if (simDir) console.log(`simulator: http://${args.host}:${server.port}/`);
-      if (args.fake) console.log(`fake agent: ${agents.length} sessions${n.speed === 1 ? '' : `, ${n.speed}x speed`}`);
-      if (args['insecure-lan']) {
+      if (simDir) console.log(`simulator: http://${o.host}:${server.port}/`);
+      if (o.fake !== null) console.log(`fake agent: ${agents.length} sessions${o.speed === 1 ? '' : `, ${o.speed}x speed`}`);
+      if (o.insecureLan) {
         console.log('warning: --insecure-lan: no pairing yet, anyone who can reach this port can approve on your behalf');
-      } else if (args.host !== '127.0.0.1' && args.host !== 'localhost') {
+      } else if (o.host !== '127.0.0.1' && o.host !== 'localhost') {
         console.log('note: devices on other machines are refused until pairing exists (or pass --insecure-lan)');
       }
       const stop = () => {
@@ -133,7 +162,7 @@ function serve(
       process.once('SIGTERM', stop);
     },
     (err: NodeJS.ErrnoException) => {
-      console.error(err.code === 'EADDRINUSE' ? `port ${n.port} is already in use` : err.message);
+      console.error(err.code === 'EADDRINUSE' ? `port ${o.port} is already in use` : err.message);
       process.exit(1);
     },
   );

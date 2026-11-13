@@ -12,6 +12,8 @@
 //   --key N      press and release a key (see ct_key_t in ui/include/ct_ui.h)
 //   --ms N       let N milliseconds pass
 //   --offline    don't connect to the bridge (must come first)
+//   --hosts 2    two computers, 台式机 and 笔记本, three demo sessions each
+//   --unlink N   computer N (0 or 1) drops off the network
 //   --verbose    print the frames sent by the device
 //
 // Actions run in the order given; 300 ms pass after each one.
@@ -30,20 +32,32 @@ const createSim = require('../web/gen/codetalky_sim.js');
 
 const [outPath, ...args] = process.argv.slice(2);
 if (!outPath || outPath.startsWith('--')) {
-  console.error('usage: node snapshot.mjs out.png [--tap x,y] [--hold x,y] [--key N] [--ms N] [--offline] [--verbose]');
+  console.error('usage: node snapshot.mjs out.png [--tap x,y] [--hold x,y] [--key N] [--ms N] [--offline] [--hosts 2] [--verbose]');
   process.exit(2);
 }
 const offline = args.includes('--offline');
 const verbose = args.includes('--verbose');
-const actions = args.filter((a) => a !== '--offline' && a !== '--verbose');
+const hostsAt = args.indexOf('--hosts');
+const twoHosts = hostsAt >= 0 && args[hostsAt + 1] === '2';
+const actions = args.filter(
+  (a, i) => a !== '--offline' && a !== '--verbose' && !(hostsAt >= 0 && (i === hostsAt || i === hostsAt + 1)),
+);
 
-// ---- bridge, in process ----
+// ---- bridges, in process: one per computer ----
 const clock = new ManualClock(DEMO_T0 * 1000);
-const hub = new Hub(clock);
-for (const script of demoScripts()) new FakeAgent(hub, clock, script);
-const toDevice = [];
-const toBridge = [];
-let link = null;
+const COMPUTERS = twoHosts
+  ? [
+      { name: '台式机', sessions: ['codetalky', 'firmware', 'docs-site'] },
+      { name: '笔记本', sessions: ['blog-engine', 'landing', 'api-server'] },
+    ]
+  : [{ name: '台式机', sessions: null }];
+const bridges = COMPUTERS.map((computer, index) => {
+  const hub = new Hub(clock);
+  for (const script of demoScripts()) {
+    if (!computer.sessions || computer.sessions.includes(script.initial(0).id)) new FakeAgent(hub, clock, script);
+  }
+  return { ...computer, index, hub, link: null, toDevice: [], toBridge: [] };
+});
 
 // ---- device ----
 const flushes = [];
@@ -51,28 +65,37 @@ const sim = await createSim({
   onFlush: (x1, y1, x2, y2, last, mode) => flushes.push({ x1, y1, x2, y2, last, mode }),
   onVibrate: (ms) => console.log(`vibrate ${ms} ms`),
   // Called from inside the UI; queue it and deliver between ticks so nothing re-enters LVGL.
-  onNetSend: (text) => {
-    if (!link) return false;
-    if (verbose) console.log(`device: ${text}`);
-    toBridge.push(text);
+  onNetSend: (link, text) => {
+    const bridge = bridges[link];
+    if (!bridge?.link) return false;
+    if (verbose) console.log(`device -> ${bridge.name}: ${text}`);
+    bridge.toBridge.push(text);
     return true;
   },
 });
 
-function toUi(text) {
+function toUi(link, text) {
   const size = sim.lengthBytesUTF8(text) + 1;
   const ptr = sim._malloc(size);
   sim.stringToUTF8(text, ptr, size);
-  sim._sim_net_rx(ptr, size - 1);
+  sim._sim_net_rx(link, ptr, size - 1);
   sim._free(ptr);
 }
 
 function deliver() {
-  while (toBridge.length > 0 || toDevice.length > 0) {
-    for (const text of toBridge.splice(0)) {
-      if (link && !link.receive(text)) console.error('the bridge dropped the device');
+  for (;;) {
+    let moved = false;
+    for (const b of bridges) {
+      for (const text of b.toBridge.splice(0)) {
+        moved = true;
+        if (b.link && !b.link.receive(text)) console.error(`${b.name} dropped the device`);
+      }
+      for (const text of b.toDevice.splice(0)) {
+        moved = true;
+        toUi(b.index, text);
+      }
     }
-    for (const text of toDevice.splice(0)) toUi(text);
+    if (!moved) return;
   }
 }
 
@@ -88,12 +111,16 @@ const run = (ms) => {
 
 sim._sim_init();
 if (!offline) {
-  link = new DeviceLink(hub, clock, (text) => toDevice.push(text), {
-    quick: DEFAULT_QUICK,
-    tzMinutes: 480,
-    flushMs: 150,
-  });
-  sim._sim_net_link(1);
+  for (const b of bridges) {
+    b.link = new DeviceLink(b.hub, clock, (text) => b.toDevice.push(text), {
+      hostName: b.name,
+      hostId: `demo-${b.index}`,
+      quick: DEFAULT_QUICK,
+      tzMinutes: 480,
+      flushMs: 150,
+    });
+    sim._sim_net_link(b.index, 1);
+  }
 }
 run(1000);
 
@@ -113,6 +140,13 @@ for (let i = 0; i < actions.length; i += 2) {
     run(300);
   } else if (flag === '--ms') {
     run(Number(value));
+  } else if (flag === '--unlink') {
+    // That computer drops off the network.
+    const b = bridges[Number(value)];
+    b.link?.close();
+    b.link = null;
+    sim._sim_net_link(b.index, 0);
+    run(1000);
   } else {
     console.error(`unknown option ${flag}`);
     process.exit(2);

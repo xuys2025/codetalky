@@ -29,8 +29,10 @@ lv_obj_t *ct_spacer(lv_obj_t *parent);
 lv_obj_t *ct_label(lv_obj_t *parent, const lv_font_t *font, const char *text);
 /* One line that takes the remaining width and ends in dots when too long. */
 lv_obj_t *ct_label_fill(lv_obj_t *parent, const lv_font_t *font, const char *text);
-/* Wrapping paragraph, full width. */
+/* Wrapping paragraph, full width, broken by Chinese line-breaking rules. */
 lv_obj_t *ct_paragraph(lv_obj_t *parent, const lv_font_t *font, const char *text);
+/* Re-break a wrapping label's text to its current width by those rules. */
+void ct_label_wrap(lv_obj_t *label);
 
 void ct_invert(lv_obj_t *obj);
 void ct_border(lv_obj_t *obj, int32_t width, lv_border_side_t side);

@@ -85,7 +85,10 @@ function originAllowed(req: IncomingMessage): boolean {
   const origin = req.headers.origin;
   if (origin === undefined) return true;
   try {
-    return new URL(origin).host === req.headers.host;
+    const url = new URL(origin);
+    // The simulator page served by one bridge may connect to the other bridges on
+    // this machine (several "computers" in a demo); pages from anywhere else may not.
+    return url.host === req.headers.host || url.hostname === '127.0.0.1' || url.hostname === 'localhost';
   } catch {
     return false;
   }

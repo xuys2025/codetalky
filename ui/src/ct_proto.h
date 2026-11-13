@@ -2,6 +2,9 @@
  * Device side of the bridge protocol (docs/PROTOCOL.md): turns incoming JSON
  * frames into model updates and builds the frames for the user's actions.
  * The bridge side is bridge/src/protocol.ts; change both together.
+ *
+ * The device talks to one bridge per computer at the same time. Each connection
+ * is a link, numbered 0 .. CT_MAX_LINKS-1 by the platform code.
  */
 #ifndef CT_PROTO_H
 #define CT_PROTO_H
@@ -37,17 +40,19 @@ typedef struct {
     ct_ack_t ack; /* CT_EV_ACK */
 } ct_event_t;
 
-/* The link came up (we say hello) or went down. */
-void ct_proto_link(bool up);
-bool ct_proto_link_up(void);
+/* A link came up (we say hello) or went down. */
+void ct_proto_link(int link, bool up);
+/* Connected and greeted by its bridge. */
+bool ct_proto_link_up(int link);
 
-/* Handle one text frame from the bridge. */
-ct_event_t ct_proto_receive(const char *json, size_t len);
+/* Handle one text frame from the bridge on a link. */
+ct_event_t ct_proto_receive(int link, const char *json, size_t len);
 
-/* Send an action. Returns its seq, or 0 if it could not be sent. */
-uint32_t ct_proto_approve(const char *id, const char *req, bool allow);
-uint32_t ct_proto_answer(const char *id, const char *req, int option);
-uint32_t ct_proto_reply(const char *id, const char *text);
-uint32_t ct_proto_seen(const char *id);
+/* Send an action to the bridge a session is on. Returns its seq, or 0 if it could
+ * not be sent. Seqs are unique across links. */
+uint32_t ct_proto_approve(int link, const char *id, const char *req, bool allow);
+uint32_t ct_proto_answer(int link, const char *id, const char *req, int option);
+uint32_t ct_proto_reply(int link, const char *id, const char *text);
+uint32_t ct_proto_seen(int link, const char *id);
 
 #endif /* CT_PROTO_H */

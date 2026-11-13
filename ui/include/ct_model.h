@@ -18,6 +18,8 @@ extern "C" {
 #define CT_ID_MAX 48  /* bytes with the terminator; the bridge keeps ids to 47 */
 #define CT_REQ_MAX 64 /* bytes with the terminator */
 #define CT_MAX_QUICK 8
+#define CT_MAX_LINKS 4 /* computers the device connects to at once */
+#define CT_HOST_MAX 32 /* bytes of a computer's name, with the terminator */
 
 typedef enum {
     CT_STATE_IDLE = 0,
@@ -120,29 +122,41 @@ typedef struct {
     int report_count;
     const char *err; /* or NULL */
 
+    uint8_t link; /* which computer (bridge connection) it is on */
     uint32_t rev; /* changes with every new snapshot */
-    bool stale;   /* not re-sent since the bridge last said hello */
+    bool stale;   /* not re-sent since that bridge last said hello */
     void *mem;    /* owns everything above */
 } ct_session_t;
 
-/* Sessions in display order: waiting for you, then errors, finished, running, idle. */
+/* Sessions from every connected computer, in display order: waiting for you, then
+ * errors, finished, running, idle. A session is identified by its link and its id:
+ * ids are only unique on one computer. */
 int ct_model_count(void);
 const ct_session_t *ct_model_at(int index);
-const ct_session_t *ct_model_find(const char *id);
+const ct_session_t *ct_model_find(int link, const char *id);
 /* Changes whenever any session is added, replaced or removed. */
 uint32_t ct_model_rev(void);
 
 /* For the protocol layer. ct_model_put takes ownership of s and of s->mem. */
 void ct_model_put(ct_session_t *s);
-void ct_model_remove(const char *id);
-void ct_model_mark_stale(void);
-void ct_model_purge_stale(void);
+void ct_model_remove(int link, const char *id);
+void ct_model_mark_stale(int link);
+void ct_model_purge_stale(int link);
+/* Forget a computer and its sessions (it has been gone too long). */
+void ct_model_drop_link(int link);
 void ct_session_free(ct_session_t *s);
 
-/* Replies the user can send with one tap. */
-int ct_model_quick_count(void);
-const char *ct_model_quick(int index);
-void ct_model_set_quick(const char *const *texts, int count);
+/* Computers. A link's host is set when its bridge says hello. */
+void ct_model_set_host(int link, const char *name);
+/* "台式机", or "" before the bridge has said hello. */
+const char *ct_model_host(int link);
+/* More than one computer known: the UI then says which one each session is on. */
+bool ct_model_many_hosts(void);
+
+/* Replies the user can send with one tap, per computer. */
+int ct_model_quick_count(int link);
+const char *ct_model_quick(int link, int index);
+void ct_model_set_quick(int link, const char *const *texts, int count);
 
 /* Wall clock, set from the bridge. ct_model_now() is 0 until then. */
 void ct_model_set_time(int64_t unix_seconds, int tz_minutes);

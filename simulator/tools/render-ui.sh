@@ -29,3 +29,7 @@ snap 10-risky --ms 50000 --tap $ROW3
 snap 11-error --tap $ROW3
 snap 12-after-approve --tap $ROW2 --tap 360,756
 snap 13-offline --offline
+# Two computers (台式机, 笔记本), three demo sessions each.
+snap 14-two-computers --hosts 2
+snap 15-two-approve --hosts 2 --tap $ROW2
+snap 16-one-offline --hosts 2 --unlink 1

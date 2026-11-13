@@ -1,6 +1,9 @@
 #include "ct_widgets.h"
 
+#include <string.h>
+
 #include "ct_hal.h"
+#include "ct_text.h"
 
 static lv_style_t s_pressed;     /* normal objects: turn black while pressed */
 static lv_style_t s_pressed_inv; /* inverted objects: turn white while pressed */
@@ -69,11 +72,30 @@ lv_obj_t *ct_label_fill(lv_obj_t *parent, const lv_font_t *font, const char *tex
     return label;
 }
 
+void ct_label_wrap(lv_obj_t *label) {
+    lv_obj_update_layout(label);
+    const int32_t width = lv_obj_get_content_width(label);
+    const char *text = lv_label_get_text(label);
+    const size_t size = strlen(text) * 2 + 1;
+    if (width <= 0 || size <= 1) {
+        return;
+    }
+    char *out = lv_malloc(size);
+    if (out == NULL) {
+        return;
+    }
+    ct_run_t run = {text, lv_obj_get_style_text_font(label, LV_PART_MAIN), out, size};
+    ct_wrap(&run, 1, width - 1); /* a pixel to spare, so LVGL never re-breaks a line */
+    lv_label_set_text(label, out);
+    lv_free(out);
+}
+
 lv_obj_t *ct_paragraph(lv_obj_t *parent, const lv_font_t *font, const char *text) {
     lv_obj_t *label = ct_label(parent, font, text);
     lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_set_width(label, LV_PCT(100));
     lv_obj_set_style_text_line_space(label, 3, 0);
+    ct_label_wrap(label);
     return label;
 }
 

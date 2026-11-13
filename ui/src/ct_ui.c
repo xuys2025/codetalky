@@ -45,21 +45,35 @@ typedef enum {
 
 static screen_id_t s_screen = SCR_NONE;
 static screen_id_t s_reply_from = SCR_LIST;
-static char s_sel[CT_ID_MAX]; /* the session on screen */
+/* A session is found by the computer (link) it is on and its id there. */
+typedef struct {
+    int link;
+    char id[CT_ID_MAX];
+} sel_t;
+
+static sel_t s_sel; /* the session on screen */
 static char s_req[CT_REQ_MAX]; /* the request shown on the approve or question screen */
-static char s_row_ids[LIST_ROWS][CT_ID_MAX];
+static sel_t s_rows[LIST_ROWS];
 static int s_tab;  /* detail tab: 0 overview, 1 activity, 2 changes */
 static int s_page; /* page within the current list */
 static const char *s_banner; /* one line at the bottom of the list, until you leave it */
 
-static bool s_link;      /* connected to the bridge */
-static bool s_synced;    /* and it has sent every session */
-static bool s_bad_proto; /* the bridge is a different version */
-static bool s_resynced;  /* everything was just re-sent: the next redraw replaces the whole page */
+/* Connections to computers. A computer that has been gone this long is forgotten,
+ * so a short Wi-Fi drop doesn't empty and refill the list. */
+#define LINK_GRACE_MS (5 * 60 * 1000)
+static struct {
+    bool seen;      /* the platform has told us about this link */
+    bool up;        /* connected */
+    bool synced;    /* and its bridge has sent every session */
+    bool bad_proto; /* its bridge is a different version */
+    uint32_t down_at;
+} s_links[CT_MAX_LINKS];
+static bool s_resynced; /* everything was just re-sent: the next redraw replaces the whole page */
 
 /* An action waiting for its ack. */
 static struct {
     uint32_t seq;
+    int link;
     uint32_t sent_at;
 } s_pending;
 
@@ -67,7 +81,7 @@ static struct {
 typedef struct {
     uint32_t rev;
     int64_t minute;
-    bool link, synced;
+    uint32_t links; /* up and synced bits of every link */
 } draw_key_t;
 static draw_key_t s_drawn;
 static uint32_t s_drawn_at;
@@ -93,7 +107,56 @@ static void show_voice(void);
 /* ---------- state ---------- */
 
 static const ct_session_t *current(void) {
-    return ct_model_find(s_sel);
+    return ct_model_find(s_sel.link, s_sel.id);
+}
+
+static void select_session(sel_t *sel, const ct_session_t *s) {
+    sel->link = s->link;
+    snprintf(sel->id, sizeof(sel->id), "%s", s->id);
+}
+
+/* How many computers are known, connected, and fully synced. */
+static int links_seen(void) {
+    int n = 0;
+    for (int i = 0; i < CT_MAX_LINKS; i++) n += s_links[i].seen ? 1 : 0;
+    return n;
+}
+
+static int links_up(void) {
+    int n = 0;
+    for (int i = 0; i < CT_MAX_LINKS; i++) n += s_links[i].up ? 1 : 0;
+    return n;
+}
+
+static bool any_synced(void) {
+    for (int i = 0; i < CT_MAX_LINKS; i++) {
+        if (s_links[i].up && s_links[i].synced) return true;
+    }
+    return false;
+}
+
+static bool any_bad_proto(void) {
+    for (int i = 0; i < CT_MAX_LINKS; i++) {
+        if (s_links[i].bad_proto) return true;
+    }
+    return false;
+}
+
+/* "笔记本", or "笔记本（离线）" while its computer is unreachable. */
+static const char *host_label(int link, char *buf, size_t size) {
+    snprintf(buf, size, "%s%s", ct_model_host(link), ct_proto_link_up(link) ? "" : "（离线）");
+    return buf;
+}
+
+/* "台式机 · " when the device knows several computers, so every line says which one. */
+static const char *host_prefix(const ct_session_t *s, char *buf, size_t size) {
+    if (ct_model_many_hosts()) {
+        char host[CT_HOST_MAX + 16];
+        snprintf(buf, size, "%s · ", host_label(s->link, host, sizeof(host)));
+    } else if (size > 0) {
+        buf[0] = '\0';
+    }
+    return buf;
 }
 
 static bool is_waiting(ct_state_t state) {
@@ -115,8 +178,10 @@ static const char *req_of(const ct_session_t *s) {
 static draw_key_t key_now(void) {
     draw_key_t k = {0};
     k.minute = ct_model_now() / 60;
-    k.link = s_link;
-    k.synced = s_synced;
+    for (int i = 0; i < CT_MAX_LINKS; i++) {
+        k.links |= (s_links[i].up ? 1u : 0u) << (2 * i);
+        k.links |= (s_links[i].synced ? 2u : 0u) << (2 * i);
+    }
     if (s_screen == SCR_LIST) {
         k.rev = ct_model_rev();
     } else {
@@ -127,7 +192,7 @@ static draw_key_t key_now(void) {
 }
 
 static bool key_eq(draw_key_t a, draw_key_t b) {
-    return a.rev == b.rev && a.minute == b.minute && a.link == b.link && a.synced == b.synced;
+    return a.rev == b.rev && a.minute == b.minute && a.links == b.links;
 }
 
 static bool input_pressed(void) {
@@ -274,7 +339,19 @@ static void status_bar(lv_obj_t *screen) {
     } else {
         snprintf(right, sizeof(right), "%s", clock);
     }
-    ct_status_bar(screen, s_link ? "codetalky" : "codetalky · 未连接", right);
+    char left[48];
+    const int seen = links_seen();
+    const int up = links_up();
+    if (up == 0) {
+        snprintf(left, sizeof(left), "codetalky · 未连接");
+    } else if (seen > 1 && up < seen) {
+        snprintf(left, sizeof(left), "codetalky · %d/%d 台在线", up, seen);
+    } else if (seen > 1) {
+        snprintf(left, sizeof(left), "codetalky · %d 台电脑", seen);
+    } else {
+        snprintf(left, sizeof(left), "codetalky");
+    }
+    ct_status_bar(screen, left, right);
 }
 
 static void state_chip(lv_obj_t *parent, ct_state_t state) {
@@ -289,8 +366,8 @@ static void header(lv_obj_t *screen, const ct_session_t *s, lv_event_cb_t on_bac
 }
 
 static void agent_meta(lv_obj_t *screen, const ct_session_t *s, const char *right) {
-    char buf[96];
-    snprintf(buf, sizeof(buf), "%s · %s", s->agent, s->model);
+    char buf[128], host[CT_HOST_MAX + 24];
+    snprintf(buf, sizeof(buf), "%s%s · %s", host_prefix(s, host, sizeof(host)), s->agent, s->model);
     ct_meta(screen, buf, right);
 }
 
@@ -337,10 +414,11 @@ static void finish_action(ct_ack_t ack) {
  * milliseconds), then goes to the list in one refresh showing the new state. */
 static void await_ack(uint32_t seq) {
     if (seq == 0) {
-        finish_action(s_link ? CT_ACK_BAD : CT_ACK_OFFLINE);
+        finish_action(ct_proto_link_up(s_sel.link) ? CT_ACK_BAD : CT_ACK_OFFLINE);
         return;
     }
     s_pending.seq = seq;
+    s_pending.link = s_sel.link;
     s_pending.sent_at = lv_tick_get();
 }
 
@@ -367,11 +445,11 @@ static void on_open_reply(lv_event_t *e) {
 
 static void on_row(lv_event_t *e) {
     const int slot = (int)(intptr_t)lv_event_get_user_data(e);
-    const ct_session_t *s = ct_model_find(s_row_ids[slot]);
+    const ct_session_t *s = ct_model_find(s_rows[slot].link, s_rows[slot].id);
     if (s == NULL) {
         return;
     }
-    snprintf(s_sel, sizeof(s_sel), "%s", s->id);
+    select_session(&s_sel, s);
     s_tab = 0;
     s_page = 0;
     open_session(s);
@@ -398,7 +476,7 @@ static void row_doing(lv_obj_t *row, const ct_session_t *s) {
 }
 
 static void session_row(lv_obj_t *parent, const ct_session_t *s, int slot) {
-    snprintf(s_row_ids[slot], sizeof(s_row_ids[slot]), "%s", s->id);
+    select_session(&s_rows[slot], s);
     lv_obj_t *row = ct_col(parent, CT_PAD, 3);
     lv_obj_set_height(row, 104);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
@@ -407,7 +485,13 @@ static void session_row(lv_obj_t *parent, const ct_session_t *s, int slot) {
     char buf[96], stat[32];
     lv_obj_t *r1 = ct_row(row, 28, 0, 10);
     ct_label(r1, MB20, s->name);
-    snprintf(buf, sizeof(buf), "%s · %s", s->agent, s->model);
+    if (ct_model_many_hosts()) {
+        /* Which computer matters more than which agent: the model name says that too. */
+        char host[CT_HOST_MAX + 16];
+        snprintf(buf, sizeof(buf), "%s · %s", host_label(s->link, host, sizeof(host)), s->model);
+    } else {
+        snprintf(buf, sizeof(buf), "%s · %s", s->agent, s->model);
+    }
     ct_label_fill(r1, M18, buf);
     state_chip(r1, s->state);
 
@@ -484,12 +568,14 @@ static void show_list(void) {
 
     lv_obj_t *content = ct_content(screen, 0);
     if (count == 0) {
-        if (s_bad_proto) {
+        if (any_bad_proto() && links_up() == 0) {
             empty_state(content, "版本对不上", "电脑上的 codetalky 和设备不是同一个版本，更新到同一版本后再连。");
-        } else if (!s_link) {
+        } else if (links_up() == 0) {
             empty_state(content, "没连上电脑", "确认电脑上的 codetalky 在运行，并且和设备在同一个 Wi-Fi 下。正在自动重连。");
-        } else if (!s_synced) {
+        } else if (!any_synced()) {
             empty_state(content, "正在同步", "电脑正在发来会话列表。");
+        } else if (links_seen() > 1) {
+            empty_state(content, "电脑上都没有会话", "在任意一台电脑上用 codetalky claude 或 codetalky codex 启动一个，这里就会出现。");
         } else {
             empty_state(content, "电脑上没有会话", "在电脑上用 codetalky claude 或 codetalky codex 启动一个，这里就会出现。");
         }
@@ -611,11 +697,12 @@ static void doing_row(lv_obj_t *parent, const char *verb, const char *target, bo
 }
 
 static void detail_overview(lv_obj_t *screen, const ct_session_t *s) {
-    char buf[96], right[48];
+    char buf[128], right[48], host[CT_HOST_MAX + 24];
+    host_prefix(s, host, sizeof(host));
     if (s->branch != NULL) {
-        snprintf(buf, sizeof(buf), "%s · %s", s->model, s->branch);
+        snprintf(buf, sizeof(buf), "%s%s · %s", host, s->model, s->branch);
     } else {
-        snprintf(buf, sizeof(buf), "%s", s->model);
+        snprintf(buf, sizeof(buf), "%s%s", host, s->model);
     }
     fmt_meta_right(right, sizeof(right), s);
     ct_meta(screen, buf, right);
@@ -784,7 +871,7 @@ static void show_detail(void) {
 /* ---------- approve ---------- */
 
 static void decide(bool allow) {
-    await_ack(ct_proto_approve(s_sel, s_req, allow));
+    await_ack(ct_proto_approve(s_sel.link, s_sel.id, s_req, allow));
 }
 
 static void on_approve(lv_event_t *e) {
@@ -911,7 +998,7 @@ static void show_approve(void) {
 
 static void on_option(lv_event_t *e) {
     const int option = (int)(intptr_t)lv_event_get_user_data(e);
-    await_ack(ct_proto_answer(s_sel, s_req, option));
+    await_ack(ct_proto_answer(s_sel.link, s_sel.id, s_req, option));
 }
 
 static void show_question(void) {
@@ -977,7 +1064,7 @@ static void show_question(void) {
 
 static void on_dismiss(lv_event_t *e) {
     (void)e;
-    await_ack(ct_proto_seen(s_sel));
+    await_ack(ct_proto_seen(s_sel.link, s_sel.id));
 }
 
 static void report_para(lv_obj_t *parent, const ct_para_t *p) {
@@ -1000,14 +1087,31 @@ static void report_para(lv_obj_t *parent, const ct_para_t *p) {
     lv_obj_set_height(spans, LV_SIZE_CONTENT);
     lv_obj_set_style_text_font(spans, F20, 0);
     lv_obj_set_style_text_line_space(spans, 3, 0);
+    /* Break the lines ourselves (Chinese rules), across the bold lead and the body. */
+    lv_obj_update_layout(spans);
+    const int32_t width = lv_obj_get_content_width(spans) - 1;
+    const char *lead_text = p->lead != NULL ? p->lead : "";
+    const size_t lead_size = strlen(lead_text) * 2 + 1;
+    const size_t body_size = strlen(p->text) * 2 + 1;
+    char *lead_out = lv_malloc(lead_size);
+    char *body_out = lv_malloc(body_size);
+    if (lead_out != NULL && body_out != NULL && width > 0) {
+        ct_run_t runs[2] = {{lead_text, B20, lead_out, lead_size}, {p->text, F20, body_out, body_size}};
+        ct_wrap(runs, 2, width);
+    } else if (lead_out != NULL && body_out != NULL) {
+        snprintf(lead_out, lead_size, "%s", lead_text);
+        snprintf(body_out, body_size, "%s", p->text);
+    }
     if (p->lead != NULL) {
         lv_span_t *lead = lv_spangroup_add_span(spans);
-        lv_span_set_text(lead, p->lead);
+        lv_span_set_text(lead, lead_out != NULL ? lead_out : p->lead);
         lv_style_set_text_font(lv_span_get_style(lead), B20);
     }
     lv_span_t *body = lv_spangroup_add_span(spans);
-    lv_span_set_text(body, p->text);
+    lv_span_set_text(body, body_out != NULL ? body_out : p->text);
     lv_spangroup_refresh(spans);
+    lv_free(lead_out);
+    lv_free(body_out);
 }
 
 static void show_done(void) {
@@ -1052,9 +1156,9 @@ static void show_done(void) {
 /* ---------- reply ---------- */
 
 static void on_quick(lv_event_t *e) {
-    const char *text = ct_model_quick((int)(intptr_t)lv_event_get_user_data(e));
+    const char *text = ct_model_quick(s_sel.link, (int)(intptr_t)lv_event_get_user_data(e));
     if (text != NULL) {
-        await_ack(ct_proto_reply(s_sel, text));
+        await_ack(ct_proto_reply(s_sel.link, s_sel.id, text));
     }
 }
 
@@ -1079,13 +1183,13 @@ static void show_reply(void) {
     lv_obj_set_style_pad_row(content, 8, 0);
     lv_obj_set_style_pad_top(content, 12, 0);
 
-    if (ct_model_quick_count() > 0) {
+    if (ct_model_quick_count(s->link) > 0) {
         ct_section(content, "点一句直接发");
     }
-    for (int i = 0; i < ct_model_quick_count(); i++) {
+    for (int i = 0; i < ct_model_quick_count(s->link); i++) {
         lv_obj_t *q = ct_row(content, 60, 14, 8);
         ct_border(q, 3, LV_BORDER_SIDE_FULL);
-        ct_label_fill(q, B20, ct_model_quick(i));
+        ct_label_fill(q, B20, ct_model_quick(s->link, i));
         ct_label(q, MB24, "›");
         ct_tappable(q, on_quick, (void *)(intptr_t)i);
     }
@@ -1110,7 +1214,7 @@ static void show_reply(void) {
 
 static void on_send(lv_event_t *e) {
     (void)e;
-    await_ack(ct_proto_reply(s_sel, s_heard));
+    await_ack(ct_proto_reply(s_sel.link, s_sel.id, s_heard));
 }
 
 static void show_voice(void) {
@@ -1185,7 +1289,7 @@ static void announce_new_requests(void) {
         if (!wants_approval(s) && !wants_answer(s)) {
             continue;
         }
-        const uint32_t h = hash_pair(s->id, req_of(s));
+        const uint32_t h = hash_pair(s->id, req_of(s)) ^ ((uint32_t)s->link * 0x9E3779B9u);
         bool known = false;
         for (int j = 0; j < s_announced_count; j++) {
             known = known || s_announced[j] == h;
@@ -1246,8 +1350,19 @@ static void follow_data(void) {
     }
 }
 
+/* Forget computers that have been gone longer than the grace period. */
+static void forget_lost_links(void) {
+    for (int i = 0; i < CT_MAX_LINKS; i++) {
+        if (s_links[i].seen && !s_links[i].up && lv_tick_elaps(s_links[i].down_at) >= LINK_GRACE_MS) {
+            s_links[i].seen = false;
+            ct_model_drop_link(i);
+        }
+    }
+}
+
 static void on_poll(lv_timer_t *timer) {
     (void)timer;
+    forget_lost_links();
     announce_new_requests();
     if (s_pending.seq != 0) {
         if (lv_tick_elaps(s_pending.sent_at) >= ACK_TIMEOUT_MS) {
@@ -1272,29 +1387,39 @@ void ct_ui_init(void) {
     lv_timer_create(on_poll, POLL_MS, NULL);
 }
 
-void ct_ui_on_link(bool up) {
-    s_link = up;
-    s_synced = false;
-    ct_proto_link(up);
-    if (!up && s_pending.seq != 0) {
+void ct_ui_on_link(int link, bool up) {
+    if (link < 0 || link >= CT_MAX_LINKS) {
+        return;
+    }
+    s_links[link].seen = true;
+    s_links[link].up = up;
+    s_links[link].synced = false;
+    if (!up) {
+        s_links[link].down_at = lv_tick_get();
+    }
+    ct_proto_link(link, up);
+    if (!up && s_pending.seq != 0 && s_pending.link == link) {
         finish_action(CT_ACK_OFFLINE);
     }
 }
 
-void ct_ui_on_message(const char *json, size_t len) {
-    const ct_event_t ev = ct_proto_receive(json, len);
+void ct_ui_on_message(int link, const char *json, size_t len) {
+    if (link < 0 || link >= CT_MAX_LINKS) {
+        return;
+    }
+    const ct_event_t ev = ct_proto_receive(link, json, len);
     switch (ev.type) {
     case CT_EV_HELLO:
-        s_synced = false;
-        s_bad_proto = false;
+        s_links[link].synced = false;
+        s_links[link].bad_proto = false;
         break;
     case CT_EV_READY:
-        s_synced = true;
+        s_links[link].synced = true;
         s_resynced = true;
         break;
-    case CT_EV_BAD_PROTO: s_bad_proto = true; break;
+    case CT_EV_BAD_PROTO: s_links[link].bad_proto = true; break;
     case CT_EV_ACK:
-        if (s_pending.seq != 0 && ev.seq == s_pending.seq) {
+        if (s_pending.seq != 0 && s_pending.link == link && ev.seq == s_pending.seq) {
             finish_action(ev.ack);
         }
         break;

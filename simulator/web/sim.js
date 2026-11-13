@@ -43,7 +43,6 @@ let partialsSinceFull = 0;
 let overlayRect = null; // area with pixels waiting for their grey pass
 let overlayTimer = null;
 let greyEnabled = true;
-let socket = null; // open WebSocket to the bridge, or null
 let buzzTimer = null;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -244,41 +243,69 @@ function onFlush(x1, y1, x2, y2, last, mode) {
   scheduleOverlay(box);
 }
 
-// ---- link to the bridge: the same server that serves this page ----
+// ---- links to bridges: one per computer ----
+// By default the one that serves this page. Several computers (each running a bridge):
+//   index.html?bridges=127.0.0.1:8137,192.168.1.20:8137
 
-function toUi(text) {
+const MAX_LINKS = 4; // CT_MAX_LINKS in ui/include/ct_model.h
+const bridges = (new URLSearchParams(location.search).get('bridges') ?? location.host)
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean)
+  .slice(0, MAX_LINKS);
+const links = bridges.map((address) => ({ address, socket: null, name: address, state: '连接中' }));
+
+function showLinks() {
+  $('st-link').textContent = links.map((l) => (links.length > 1 ? `${l.name} ${l.state}` : l.state)).join(' · ');
+}
+
+function toUi(link, text) {
   const size = sim.lengthBytesUTF8(text) + 1;
   const ptr = sim._malloc(size);
   sim.stringToUTF8(text, ptr, size);
-  sim._sim_net_rx(ptr, size - 1);
+  sim._sim_net_rx(link, ptr, size - 1);
   sim._free(ptr);
 }
 
-function onNetSend(text) {
+function onNetSend(link, text) {
+  const socket = links[link]?.socket;
   if (!socket || socket.readyState !== WebSocket.OPEN) return false;
   socket.send(text);
   return true;
 }
 
-function connect() {
-  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/device`;
-  $('st-link').textContent = '连接中';
-  const ws = new WebSocket(url);
+function connect(index) {
+  const link = links[index];
+  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  link.state = '连接中';
+  showLinks();
+  const ws = new WebSocket(`${scheme}://${link.address}/device`);
   ws.onopen = () => {
-    socket = ws;
-    $('st-link').textContent = '已连接';
-    sim._sim_net_link(1);
+    link.socket = ws;
+    link.state = '已连接';
+    showLinks();
+    sim._sim_net_link(index, 1);
   };
   ws.onmessage = (event) => {
-    if (typeof event.data === 'string') toUi(event.data);
+    if (typeof event.data !== 'string') return;
+    if (event.data.startsWith('{"t":"hello"')) {
+      try {
+        link.name = JSON.parse(event.data).host || link.address;
+        showLinks();
+      } catch {
+        // the UI will complain about it, not us
+      }
+    }
+    toUi(index, event.data);
   };
   ws.onclose = () => {
-    if (socket === ws) {
-      socket = null;
-      sim._sim_net_link(0);
+    if (link.socket === ws) {
+      link.socket = null;
+      sim._sim_net_link(index, 0);
     }
-    $('st-link').textContent = '未连接，2 秒后重试';
-    setTimeout(connect, 2000);
+    link.state = '未连接，2 秒后重试';
+    showLinks();
+    setTimeout(() => connect(index), 2000);
   };
 }
 
@@ -374,7 +401,7 @@ async function start() {
 
   bindInput();
   sim._sim_init();
-  connect();
+  links.forEach((_, i) => connect(i));
 
   let last = performance.now();
   setInterval(() => {

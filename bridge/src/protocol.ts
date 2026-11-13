@@ -91,7 +91,8 @@ export interface SessionSnapshot {
 export type AckError = 'gone' | 'stale' | 'unsupported' | 'bad';
 
 export type ToDevice =
-  | { t: 'hello'; proto: number; time: number; tz: number; quick: string[] }
+  /** host: this computer's name as the user knows it; hostId: stays the same across restarts and IP changes. */
+  | { t: 'hello'; proto: number; host: string; hostId: string; time: number; tz: number; quick: string[] }
   | { t: 'session'; s: SessionSnapshot }
   | { t: 'gone'; id: string }
   | { t: 'ready' }

@@ -25,8 +25,10 @@
 #define LEN_TARGET 400
 #define LEN_TEXT 1500 /* what the agent said, report paragraphs */
 
-static bool s_up;
-static bool s_greeted; /* the bridge said hello on this connection */
+static struct {
+    bool up;
+    bool greeted; /* its bridge said hello on this connection */
+} s_links[CT_MAX_LINKS];
 static uint32_t s_seq = 1;
 
 /* ---------- reading JSON ---------- */
@@ -327,8 +329,14 @@ static ct_ack_t ack_of(const char *err) {
     return CT_ACK_BAD;
 }
 
-static void on_hello(const cJSON *msg) {
+static bool valid_link(int link) {
+    return link >= 0 && link < CT_MAX_LINKS;
+}
+
+static void on_hello(int link, const cJSON *msg) {
     ct_model_set_time(time_of(msg, "time"), int_of(msg, "tz", 0));
+    const char *host = raw_string(msg, "host");
+    ct_model_set_host(link, host != NULL && host[0] != '\0' ? host : "电脑");
     const cJSON *quick = field(msg, "quick");
     if (!cJSON_IsArray(quick)) {
         quick = NULL;
@@ -341,13 +349,16 @@ static void on_hello(const cJSON *msg) {
             texts[count++] = item->valuestring;
         }
     }
-    ct_model_set_quick(texts, count);
+    ct_model_set_quick(link, texts, count);
     /* Sessions not re-sent before "ready" have ended while we were away. */
-    ct_model_mark_stale();
+    ct_model_mark_stale(link);
 }
 
-ct_event_t ct_proto_receive(const char *json, size_t len) {
+ct_event_t ct_proto_receive(int link, const char *json, size_t len) {
     ct_event_t ev = {0};
+    if (!valid_link(link)) {
+        return ev;
+    }
     cJSON *msg = cJSON_ParseWithLength(json, len);
     if (msg == NULL) {
         return ev;
@@ -359,26 +370,27 @@ ct_event_t ct_proto_receive(const char *json, size_t len) {
         if (int_of(msg, "proto", -1) != CT_PROTO_VERSION) {
             ev.type = CT_EV_BAD_PROTO;
         } else {
-            on_hello(msg);
-            s_greeted = true;
+            on_hello(link, msg);
+            s_links[link].greeted = true;
             ev.type = CT_EV_HELLO;
         }
-    } else if (!s_greeted) {
+    } else if (!s_links[link].greeted) {
         /* Nothing counts before the bridge's hello. */
     } else if (strcmp(t, "session") == 0) {
         ct_session_t *s = parse_session(field(msg, "s"));
         if (s != NULL) {
+            s->link = (uint8_t)link;
             ct_model_put(s);
             ev.type = CT_EV_CHANGED;
         }
     } else if (strcmp(t, "gone") == 0) {
         const char *id = raw_string(msg, "id");
         if (id != NULL) {
-            ct_model_remove(id);
+            ct_model_remove(link, id);
             ev.type = CT_EV_CHANGED;
         }
     } else if (strcmp(t, "ready") == 0) {
-        ct_model_purge_stale();
+        ct_model_purge_stale(link);
         ev.type = CT_EV_READY;
     } else if (strcmp(t, "ack") == 0) {
         ev.type = CT_EV_ACK;
@@ -391,37 +403,40 @@ ct_event_t ct_proto_receive(const char *json, size_t len) {
 
 /* ---------- outgoing ---------- */
 
-static bool send_json(cJSON *msg) {
+static bool send_json(int link, cJSON *msg) {
     char *text = cJSON_PrintUnformatted(msg);
     cJSON_Delete(msg);
     if (text == NULL) {
         return false;
     }
-    const bool ok = ct_hal_net_send(text);
+    const bool ok = ct_hal_net_send(link, text);
     cJSON_free(text);
     return ok;
 }
 
-void ct_proto_link(bool up) {
-    s_up = up;
-    s_greeted = false;
+void ct_proto_link(int link, bool up) {
+    if (!valid_link(link)) {
+        return;
+    }
+    s_links[link].up = up;
+    s_links[link].greeted = false;
     if (up) {
         cJSON *hello = cJSON_CreateObject();
         if (hello != NULL) {
             cJSON_AddStringToObject(hello, "t", "hello");
             cJSON_AddNumberToObject(hello, "proto", CT_PROTO_VERSION);
             cJSON_AddStringToObject(hello, "device", CT_DEVICE_NAME);
-            send_json(hello);
+            send_json(link, hello);
         }
     }
 }
 
-bool ct_proto_link_up(void) {
-    return s_up && s_greeted;
+bool ct_proto_link_up(int link) {
+    return valid_link(link) && s_links[link].up && s_links[link].greeted;
 }
 
-static cJSON *action(const char *type, const char *id) {
-    if (!ct_proto_link_up() || id == NULL) {
+static cJSON *action(int link, const char *type, const char *id) {
+    if (!ct_proto_link_up(link) || id == NULL) {
         return NULL;
     }
     cJSON *msg = cJSON_CreateObject();
@@ -432,7 +447,7 @@ static cJSON *action(const char *type, const char *id) {
     return msg;
 }
 
-static uint32_t send_action(cJSON *msg) {
+static uint32_t send_action(int link, cJSON *msg) {
     if (msg == NULL) {
         return 0;
     }
@@ -441,35 +456,35 @@ static uint32_t send_action(cJSON *msg) {
         s_seq = 1;
     }
     cJSON_AddNumberToObject(msg, "seq", seq);
-    return send_json(msg) ? seq : 0;
+    return send_json(link, msg) ? seq : 0;
 }
 
-uint32_t ct_proto_approve(const char *id, const char *req, bool allow) {
-    cJSON *msg = action("approve", id);
+uint32_t ct_proto_approve(int link, const char *id, const char *req, bool allow) {
+    cJSON *msg = action(link, "approve", id);
     if (msg != NULL) {
         cJSON_AddStringToObject(msg, "req", req);
         cJSON_AddBoolToObject(msg, "allow", allow);
     }
-    return send_action(msg);
+    return send_action(link, msg);
 }
 
-uint32_t ct_proto_answer(const char *id, const char *req, int option) {
-    cJSON *msg = action("answer", id);
+uint32_t ct_proto_answer(int link, const char *id, const char *req, int option) {
+    cJSON *msg = action(link, "answer", id);
     if (msg != NULL) {
         cJSON_AddStringToObject(msg, "req", req);
         cJSON_AddNumberToObject(msg, "option", option);
     }
-    return send_action(msg);
+    return send_action(link, msg);
 }
 
-uint32_t ct_proto_reply(const char *id, const char *text) {
-    cJSON *msg = action("reply", id);
+uint32_t ct_proto_reply(int link, const char *id, const char *text) {
+    cJSON *msg = action(link, "reply", id);
     if (msg != NULL) {
         cJSON_AddStringToObject(msg, "text", text);
     }
-    return send_action(msg);
+    return send_action(link, msg);
 }
 
-uint32_t ct_proto_seen(const char *id) {
-    return send_action(action("seen", id));
+uint32_t ct_proto_seen(int link, const char *id) {
+    return send_action(link, action(link, "seen", id));
 }

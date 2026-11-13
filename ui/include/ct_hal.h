@@ -28,8 +28,8 @@ void ct_hal_refresh_hint(ct_refresh_t mode);
 /* One short haptic pulse. */
 void ct_hal_vibrate(uint16_t ms);
 
-/* Send one text frame (JSON) to the bridge. False if the link is down. */
-bool ct_hal_net_send(const char *json);
+/* Send one text frame (JSON) to the bridge on a link (one per computer). False if that link is down. */
+bool ct_hal_net_send(int link, const char *json);
 
 /* Battery charge in percent, or -1 if unknown. */
 int ct_hal_battery_percent(void);
