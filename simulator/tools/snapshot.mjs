@@ -72,6 +72,8 @@ const random = () => {
   t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
   return (t ^ (t >>> 14)) >>> 0;
 };
+// The computers' side of pairing draws from the same sequence (never do this outside screenshots).
+const entropy = (n) => Buffer.from(Array.from({ length: n }, () => random() & 0xff));
 const bridges = COMPUTERS.map((computer, index) => {
   const hub = new Hub(clock);
   for (const script of demoScripts()) {
@@ -154,6 +156,7 @@ if (!offline) {
       quick: DEFAULT_QUICK,
       fixText: (text) => glyphs.fix(text),
       pairing: b.pairing,
+      entropy,
       tzMinutes: 480,
       flushMs: 150,
     });
@@ -204,6 +207,7 @@ for (let i = 0; i < actions.length; i += 2) {
       quick: DEFAULT_QUICK,
       fixText: (text) => glyphs.fix(text),
       pairing: b.pairing,
+      entropy,
       tzMinutes: 480,
       flushMs: 150,
     });

@@ -16,6 +16,7 @@ import {
   createCipheriv,
   createDecipheriv,
   createHash,
+  createPrivateKey,
   createPublicKey,
   diffieHellman,
   generateKeyPairSync,
@@ -74,9 +75,15 @@ export interface KeyPair {
   pub: Buffer;
 }
 
-export function newKeyPair(): KeyPair {
-  const { privateKey, publicKey } = generateKeyPairSync('x25519');
-  const x = publicKey.export({ format: 'jwk' }).x;
+/** PKCS#8 wrapping of a raw 32-byte X25519 private key (RFC 8410). */
+const X25519_PKCS8 = Buffer.from('302e020100300506032b656e04220420', 'hex');
+
+/** A fresh key pair; from given secret bytes only where results must repeat (rendering screenshots). */
+export function newKeyPair(secret?: Buffer): KeyPair {
+  const privateKey = secret
+    ? createPrivateKey({ key: Buffer.concat([X25519_PKCS8, secret]), format: 'der', type: 'pkcs8' })
+    : generateKeyPairSync('x25519').privateKey;
+  const x = createPublicKey(privateKey).export({ format: 'jwk' }).x;
   return { secret: privateKey, pub: Buffer.from(x ?? '', 'base64url') };
 }
 

@@ -62,7 +62,13 @@ void ct_proto_pair_again(int link);       /* new code, new request (the old one 
 /* Send an action to the bridge a session is on. Returns its seq, or 0 if it could
  * not be sent. Seqs are unique across links. */
 uint32_t ct_proto_approve(int link, const char *id, const char *req, bool allow);
+/* A plan not approved, with what to change (text may be NULL). */
+uint32_t ct_proto_send_back(int link, const char *id, const char *req, const char *text);
 uint32_t ct_proto_answer(int link, const char *id, const char *req, int option);
+/* A multi-select question: the options picked. */
+uint32_t ct_proto_answer_many(int link, const char *id, const char *req, const int *options, int count);
+/* A question answered in the user's own words. */
+uint32_t ct_proto_answer_text(int link, const char *id, const char *req, const char *text);
 uint32_t ct_proto_reply(int link, const char *id, const char *text);
 uint32_t ct_proto_seen(int link, const char *id);
 

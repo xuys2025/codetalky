@@ -66,7 +66,12 @@ typedef struct {
     const char *text;
 } ct_para_t;
 
-typedef enum { CT_ASK_NONE = 0, CT_ASK_APPROVE, CT_ASK_QUESTION } ct_ask_kind_t;
+typedef enum {
+    CT_ASK_NONE = 0,
+    CT_ASK_APPROVE,  /* a permission request */
+    CT_ASK_QUESTION, /* a multiple-choice question */
+    CT_ASK_PLAN,     /* a plan to approve before the agent starts (session state is WAIT_APPROVE) */
+} ct_ask_kind_t;
 
 typedef struct {
     ct_ask_kind_t kind;
@@ -80,13 +85,18 @@ typedef struct {
     const char *const *lines;
     int line_count;
     const char *why;
-    int64_t until; /* 0 = no deadline */
+    int64_t until; /* 0 = no deadline (approve and plan) */
     bool risky;    /* approve needs a long press */
 
     /* question */
     const char *text, *note;
     const ct_option_t *options;
     int option_count;
+    bool multi; /* several options may be picked */
+
+    /* plan */
+    const ct_para_t *plan;
+    int plan_count;
 } ct_ask_t;
 
 typedef struct {

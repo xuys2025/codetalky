@@ -15,7 +15,7 @@
 // opens, before the agent has a session (Codex starts one only at the first prompt),
 // and keep that one entry across the agent's sessions (/clear).
 
-import { LIMITS, type ApproveAsk, type QuestionAsk, type SessionSnapshot } from '../protocol.ts';
+import { LIMITS, type ApproveAsk, type Choice, type PlanAsk, type QuestionAsk, type SessionSnapshot } from '../protocol.ts';
 import type { Clock } from '../clock.ts';
 import type { Hub } from '../hub.ts';
 import type { IncomingHttpHeaders } from 'node:http';
@@ -87,13 +87,17 @@ interface Question {
   question: string;
   header?: string;
   options: { label: string; description?: string }[];
+  multiSelect: boolean;
 }
+
+/** Claude's plan mode: approving the plan lets it start; from then on each step still asks (default mode). */
+const PLAN_APPROVED_MODE = 'default';
 
 /** A request held open for the device. Only the first one in a session's queue is shown. */
 interface Held {
   req: string;
   /** What the device sees while this request is shown. */
-  ask: ApproveAsk | QuestionAsk;
+  ask: ApproveAsk | QuestionAsk | PlanAsk;
   tool: string;
   target: string;
   /** For AskUserQuestion: all its questions, the one shown, and answers so far. */
@@ -232,8 +236,8 @@ export class ClaudeSource {
         hunks: { total: 0, list: [] },
       },
       {
-        decide: (req, allow) => this.decide(id, req, allow),
-        answer: (req, option) => this.answer(id, req, option),
+        decide: (req, allow, text) => this.decide(id, req, allow, text),
+        answer: (req, choice) => this.answer(id, req, choice),
         reply: (text) => this.reply(id, text),
       },
     );
@@ -425,7 +429,8 @@ export class ClaudeSource {
         });
         return NO_DECISION;
       case 'PermissionRequest':
-        if (tool === 'AskUserQuestion' || tool === 'ExitPlanMode') return NO_DECISION;
+        if (tool === 'ExitPlanMode') return this.holdPlan(session, input, gone);
+        if (tool === 'AskUserQuestion') return NO_DECISION;
         return this.holdPermission(session, tool, input, cwd, gone);
       case 'PostToolUse':
         this.settled(session, tool, input);
@@ -578,15 +583,16 @@ export class ClaudeSource {
     const head = session.held[0];
     if (!head) return;
     const now = this.now();
-    if (head.ask.kind === 'approve') head.ask.until = now + this.options.holdSeconds;
+    if (head.ask.kind !== 'question') head.ask.until = now + this.options.holdSeconds;
     head.cancelTimer = this.clock.after(this.options.holdSeconds * 1000, () => {
       this.release(session, head, '没等到设备回话，回电脑确认');
     });
     this.change(session.id, (s) => {
-      s.state = head.ask.kind === 'approve' ? 'approve' : 'question';
+      s.state = head.ask.kind === 'question' ? 'question' : 'approve';
       s.since = now;
       s.ask = head.ask;
       if (head.ask.kind === 'approve') s.now = { verb: head.ask.verb, target: head.ask.target, add: head.ask.add, del: head.ask.del };
+      if (head.ask.kind === 'plan') s.now = { verb: '计划', target: `${head.ask.plan[0]?.lead ?? ''}${head.ask.plan[0]?.text ?? ''}` };
     });
   }
 
@@ -675,6 +681,7 @@ export class ClaudeSource {
         question: q.question as string,
         header: str(q.header),
         options: (q.options as unknown[]).map(obj).map((o) => ({ label: str(o.label) ?? '', description: str(o.description) })),
+        multiSelect: q.multiSelect === true,
       }));
     if (questions.length === 0) return Promise.resolve(NO_DECISION);
     const req = `r${this.nextReq++}`;
@@ -698,15 +705,53 @@ export class ClaudeSource {
       text: q.question,
       options: q.options.map((o) => (o.description ? { label: o.label, desc: o.description } : { label: o.label })),
     };
-    const note = [questions.length > 1 ? `第 ${index + 1}/${questions.length} 题` : '', q.header ?? ''].filter(Boolean).join(' · ');
+    if (q.multiSelect) ask.multi = true;
+    const note = [questions.length > 1 ? `第 ${index + 1}/${questions.length} 题` : '', q.header ?? '', q.multiSelect ? '可以多选' : '']
+      .filter(Boolean)
+      .join(' · ');
     if (note) ask.note = note;
     return ask;
   }
 
-  private decide(id: string, req: string, allow: boolean): void {
+  /** Claude finished planning and wants to start: show the plan, approve it or send it back. */
+  private holdPlan(session: Session, input: Record<string, unknown>, gone?: AbortSignal): Promise<PostReply> {
+    if (this.hub.devices() === 0) return Promise.resolve(NO_DECISION);
+    const text = str(input.plan) ?? '';
+    const req = `r${this.nextReq++}`;
+    const plan = reportFromMarkdown(text);
+    const ask: PlanAsk = { kind: 'plan', req, plan: plan.length > 0 ? plan : [{ text: '（计划是空的，详情回电脑看）' }] };
+    return this.hold(session, { req, ask, tool: 'ExitPlanMode', target: '计划', input }, gone);
+  }
+
+  private decide(id: string, req: string, allow: boolean, text?: string): void {
     const session = this.sessions.get(id);
     const head = session?.held[0];
-    if (!session || !head || head.req !== req || head.ask.kind !== 'approve') return;
+    if (!session || !head || head.req !== req || (head.ask.kind !== 'approve' && head.ask.kind !== 'plan')) return;
+    if (head.ask.kind === 'plan') {
+      head.finish({
+        status: 200,
+        body: {
+          hookSpecificOutput: {
+            hookEventName: 'PermissionRequest',
+            decision: allow
+              ? {
+                  behavior: 'allow',
+                  updatedInput: head.input,
+                  updatedPermissions: [{ type: 'setMode', mode: PLAN_APPROVED_MODE, destination: 'session' }],
+                }
+              : {
+                  behavior: 'deny',
+                  message: text
+                    ? `用户在 CodeTalky 设备上看了计划，要你改：${text}`
+                    : '用户在 CodeTalky 设备上没有批准这个计划。请继续完善，改好后再提交。',
+                },
+          },
+        },
+      });
+      this.change(id, (s) => this.log(s, allow ? { verb: '计划', target: '已批准' } : { verb: '计划', target: text ? `打回：${text}` : '打回重做', bad: true }));
+      this.advance(session);
+      return;
+    }
     if (head.viaKeys) {
       const keys = this.options.terminalKeys!;
       const token = session.token;
@@ -746,15 +791,23 @@ export class ClaudeSource {
     this.advance(session);
   }
 
-  private answer(id: string, req: string, option: number): void {
+  private answer(id: string, req: string, choice: Choice): void {
     const session = this.sessions.get(id);
     const head = session?.held[0];
     if (!session || !head || head.req !== req || !head.questions || head.index === undefined || !head.answers) return;
     const q = head.questions[head.index]!;
-    const chosen = q.options[option];
-    if (!chosen) return;
-    head.answers[q.question] = chosen.label;
-    this.change(id, (s) => this.log(s, { verb: '答', target: chosen.label }));
+    // Claude's own format: the option's label; several joined with commas; or the user's words.
+    let said: string;
+    if ('text' in choice) {
+      said = choice.text;
+    } else {
+      const picked = 'option' in choice ? [choice.option] : choice.options;
+      const labels = picked.map((i) => q.options[i]?.label);
+      if (labels.length === 0 || labels.some((l) => l === undefined)) return;
+      said = labels.join(', ');
+    }
+    head.answers[q.question] = said;
+    this.change(id, (s) => this.log(s, { verb: '答', target: said }));
     if (head.index + 1 < head.questions.length) {
       // Next question of the same call, under a new request id.
       head.index++;

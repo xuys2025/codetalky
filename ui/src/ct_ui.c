@@ -44,7 +44,17 @@ typedef enum {
     SCR_ENTRY, /* one activity entry in full */
     SCR_DIFF,  /* the whole change a permission request would make */
     SCR_PAIR,  /* a computer wants this device to pair */
+    SCR_PLAN,  /* a plan to approve or send back */
 } screen_id_t;
+
+/* What the reply screen's words are for. */
+typedef enum {
+    REPLY_SAY,    /* a new instruction, typed into the agent's terminal */
+    REPLY_ANSWER, /* the answer to the question on screen, in the user's own words */
+    REPLY_PLAN,   /* what to change in the plan on screen (it goes back to the agent) */
+} reply_mode_t;
+static reply_mode_t s_reply_mode = REPLY_SAY;
+static uint32_t s_picked; /* multi-select question: options picked so far, one bit each */
 
 /* Pairing: the screen shows the code of one computer that asked. A code is good for
  * five minutes on the computer; a fresh one is requested a little before that. */
@@ -116,6 +126,7 @@ static void show_voice(void);
 static void show_entry(void);
 static void show_diff(void);
 static void show_pair(void);
+static void show_plan(void);
 
 /* The activity entry on the entry screen. Entries have no id and the log shifts as
  * new ones arrive, so it is found again by its time, verb and target. */
@@ -201,6 +212,17 @@ static bool wants_approval(const ct_session_t *s) {
 
 static bool wants_answer(const ct_session_t *s) {
     return s->state == CT_STATE_WAIT_ANSWER && s->ask.kind == CT_ASK_QUESTION;
+}
+
+static bool wants_plan(const ct_session_t *s) {
+    return s->state == CT_STATE_WAIT_APPROVE && s->ask.kind == CT_ASK_PLAN;
+}
+
+/* The plan's first line (a heading is a bold lead with no text), for rows and the overview. */
+static const char *plan_gist(const ct_session_t *s) {
+    if (s->ask.plan_count == 0) return "计划写好了";
+    const ct_para_t *first = &s->ask.plan[0];
+    return first->text[0] == '\0' && first->lead != NULL ? first->lead : first->text;
 }
 
 static const char *req_of(const ct_session_t *s) {
@@ -419,6 +441,8 @@ static lv_obj_t *short_paragraph(lv_obj_t *parent, const lv_font_t *font, const 
 static void open_session(const ct_session_t *s) {
     if (wants_approval(s)) {
         show_approve();
+    } else if (wants_plan(s)) {
+        show_plan();
     } else if (wants_answer(s)) {
         show_question();
     } else if (s->state == CT_STATE_DONE) {
@@ -464,14 +488,29 @@ static void on_back_from_reply(lv_event_t *e) {
     case SCR_DONE: show_done(); break;
     case SCR_DETAIL: show_detail(); break;
     case SCR_QUESTION: show_question(); break;
+    case SCR_PLAN: show_plan(); break;
     default: show_list(); break;
     }
 }
 
-static void on_open_reply(lv_event_t *e) {
-    (void)e;
+static void open_reply(reply_mode_t mode) {
+    s_reply_mode = mode;
     s_reply_from = s_screen;
     show_reply();
+}
+
+static void on_open_reply(lv_event_t *e) {
+    (void)e;
+    open_reply(REPLY_SAY);
+}
+
+/* Send the user's words where the reply screen was opened for. */
+static void send_words(const char *text) {
+    switch (s_reply_mode) {
+    case REPLY_ANSWER: await_ack(ct_proto_answer_text(s_sel.link, s_sel.id, s_req, text)); break;
+    case REPLY_PLAN: await_ack(ct_proto_send_back(s_sel.link, s_sel.id, s_req, text)); break;
+    default: await_ack(ct_proto_reply(s_sel.link, s_sel.id, text)); break;
+    }
 }
 
 /* ---------- session list ---------- */
@@ -493,6 +532,9 @@ static void row_doing(lv_obj_t *row, const ct_session_t *s) {
     if (wants_approval(s)) {
         ct_verb(row, s->ask.verb);
         ct_label_fill(row, M20, s->ask.target);
+    } else if (wants_plan(s)) {
+        ct_verb(row, "计划");
+        ct_label_fill(row, F20, plan_gist(s));
     } else if (wants_answer(s)) {
         ct_verb(row, "问");
         ct_label_fill(row, F20, s->ask.text);
@@ -773,6 +815,9 @@ static void detail_overview(lv_obj_t *screen, const ct_session_t *s) {
     if (wants_approval(s)) {
         ct_section(content, "等你批准");
         doing_row(content, s->ask.verb, s->ask.target, s->ask.has_stat, s->ask.add, s->ask.del);
+    } else if (wants_plan(s)) {
+        ct_section(content, "等你批准计划");
+        short_paragraph(content, B20, plan_gist(s), 2);
     } else if (wants_answer(s)) {
         ct_section(content, "等你回答");
         short_paragraph(content, B20, s->ask.text, 2);
@@ -936,7 +981,7 @@ static void show_detail(void) {
     lv_obj_t *bar = ct_bottom_bar(screen, 76);
     ct_pager(bar, buf, on_detail_prev, on_detail_next);
     ct_spacer(bar);
-    if (wants_approval(s)) {
+    if (wants_approval(s) || wants_plan(s)) {
         ct_button(bar, "去批准", B20, 112, 56, true, on_go_session, NULL);
     } else if (wants_answer(s)) {
         ct_button(bar, "去回答", B20, 112, 56, true, on_go_session, NULL);
@@ -1264,6 +1309,30 @@ static void on_option(lv_event_t *e) {
     await_ack(ct_proto_answer(s_sel.link, s_sel.id, s_req, option));
 }
 
+/* Multi-select: a tap ticks or unticks; "确定" sends what is ticked. */
+static void on_pick(lv_event_t *e) {
+    s_picked ^= 1u << (int)(intptr_t)lv_event_get_user_data(e);
+    s_next_refresh = CT_REFRESH_PARTIAL;
+    show_question();
+}
+
+static void on_picked(lv_event_t *e) {
+    (void)e;
+    int options[32];
+    int count = 0;
+    for (int i = 0; i < 32; i++) {
+        if (s_picked & (1u << i)) options[count++] = i;
+    }
+    if (count > 0) {
+        await_ack(ct_proto_answer_many(s_sel.link, s_sel.id, s_req, options, count));
+    }
+}
+
+static void on_own_answer(lv_event_t *e) {
+    (void)e;
+    open_reply(REPLY_ANSWER);
+}
+
 static void show_question(void) {
     const ct_session_t *s = current();
     if (s == NULL) {
@@ -1275,6 +1344,9 @@ static void show_question(void) {
         return;
     }
     const ct_ask_t *ask = &s->ask;
+    if (strcmp(s_req, req_of(s)) != 0) {
+        s_picked = 0; /* a new question */
+    }
     snprintf(s_req, sizeof(s_req), "%s", req_of(s));
 
     lv_obj_t *screen = ct_screen_new();
@@ -1293,14 +1365,25 @@ static void show_question(void) {
         short_paragraph(content, F20, ask->note, 3);
     }
 
+    int picked = 0;
     for (int i = 0; i < ask->option_count; i++) {
+        const bool ticked = ask->multi && (s_picked & (1u << i)) != 0;
+        picked += ticked ? 1 : 0;
         lv_obj_t *opt = ct_row(content, 88, 14, 14);
         ct_border(opt, 3, LV_BORDER_SIDE_FULL);
         lv_obj_t *num = ct_box(opt);
         lv_obj_set_size(num, 48, 48);
-        ct_invert(num);
-        snprintf(buf, sizeof(buf), "%d", i + 1);
-        lv_obj_center(ct_label(num, MB24, buf));
+        if (ask->multi && !ticked) {
+            ct_border(num, 3, LV_BORDER_SIDE_FULL); /* an empty box until ticked */
+        } else {
+            ct_invert(num);
+        }
+        if (ask->multi) {
+            lv_obj_center(ct_label(num, B24, ticked ? "√" : ""));
+        } else {
+            snprintf(buf, sizeof(buf), "%d", i + 1);
+            lv_obj_center(ct_label(num, MB24, buf));
+        }
         lv_obj_t *text = ct_col(opt, 0, 2);
         lv_obj_set_flex_grow(text, 1);
         lv_obj_t *label = ct_label(text, B20, ask->options[i].label);
@@ -1311,15 +1394,22 @@ static void show_question(void) {
             lv_label_set_long_mode(desc, LV_LABEL_LONG_MODE_DOTS);
             lv_obj_set_width(desc, LV_PCT(100));
         }
-        ct_tappable(opt, on_option, (void *)(intptr_t)i);
+        ct_tappable(opt, ask->multi ? on_pick : on_option, (void *)(intptr_t)i);
     }
-    if (s->reply) {
-        ct_button(content, "都不是，按住这里说", B20, LV_PCT(100), 64, false, on_open_reply, NULL);
-    }
+    /* Not among the options: the user's own words become the answer. */
+    ct_button(content, "都不是，我自己说", B20, LV_PCT(100), 64, false, on_own_answer, NULL);
 
-    lv_obj_t *hint = ct_row(screen, 44, CT_PAD, 0);
-    lv_obj_set_flex_align(hint, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    ct_label(hint, F18, "点一个选项，就直接发给它");
+    if (ask->multi) {
+        lv_obj_t *bar = ct_bottom_bar(screen, 76);
+        snprintf(buf, sizeof(buf), picked > 0 ? "选了 %d 个" : "点选项打勾，可以选几个", picked);
+        ct_label(bar, F18, buf);
+        ct_spacer(bar);
+        ct_button(bar, "确定", B20, 112, 56, picked > 0, picked > 0 ? on_picked : NULL, NULL);
+    } else {
+        lv_obj_t *hint = ct_row(screen, 44, CT_PAD, 0);
+        lv_obj_set_flex_align(hint, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        ct_label(hint, F18, "点一个选项，就直接发给它");
+    }
     present(screen, SCR_QUESTION);
 }
 
@@ -1375,6 +1465,39 @@ static void report_para(lv_obj_t *parent, const ct_para_t *p) {
     lv_spangroup_refresh(spans);
     lv_free(lead_out);
     lv_free(body_out);
+}
+
+/* Long reports and plans: split the paragraphs into pages that fit, show page s_page,
+ * and say which in the pager label. */
+static void paginate(lv_obj_t *screen, lv_obj_t *content, lv_obj_t *pager) {
+    lv_obj_update_layout(screen);
+    const int32_t room = lv_obj_get_content_height(content);
+    const uint32_t count = lv_obj_get_child_count(content);
+    int page = 0;
+    int32_t used = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        lv_obj_t *para = lv_obj_get_child(content, (int32_t)i);
+        const int32_t h = lv_obj_get_height(para);
+        if (used > 0 && used + h > room) {
+            page++;
+            used = 0;
+        }
+        used += h + 7;
+        lv_obj_set_user_data(para, (void *)(intptr_t)page);
+    }
+    s_done_pages = page + 1;
+    if (s_page >= s_done_pages) {
+        s_page = s_done_pages - 1;
+    }
+    for (uint32_t i = 0; i < count; i++) {
+        lv_obj_t *para = lv_obj_get_child(content, (int32_t)i);
+        if ((int)(intptr_t)lv_obj_get_user_data(para) != s_page) {
+            lv_obj_add_flag(para, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d/%d", s_page + 1, s_done_pages);
+    lv_label_set_text(pager, buf);
 }
 
 static void on_done_prev(lv_event_t *e) {
@@ -1435,35 +1558,87 @@ static void show_done(void) {
         ct_button(bar, "回复", B20, 80, 56, true, on_open_reply, NULL);
     }
 
-    /* Long reports: split the paragraphs into pages that fit, show one page. */
-    lv_obj_update_layout(screen);
-    const int32_t room = lv_obj_get_content_height(content);
-    const uint32_t count = lv_obj_get_child_count(content);
-    int page = 0;
-    int32_t used = 0;
-    for (uint32_t i = 0; i < count; i++) {
-        lv_obj_t *para = lv_obj_get_child(content, (int32_t)i);
-        const int32_t h = lv_obj_get_height(para);
-        if (used > 0 && used + h > room) {
-            page++;
-            used = 0;
-        }
-        used += h + 7;
-        lv_obj_set_user_data(para, (void *)(intptr_t)page);
-    }
-    s_done_pages = page + 1;
-    if (s_page >= s_done_pages) {
-        s_page = s_done_pages - 1;
-    }
-    for (uint32_t i = 0; i < count; i++) {
-        lv_obj_t *para = lv_obj_get_child(content, (int32_t)i);
-        if ((int)(intptr_t)lv_obj_get_user_data(para) != s_page) {
-            lv_obj_add_flag(para, LV_OBJ_FLAG_HIDDEN);
-        }
-    }
-    snprintf(buf, sizeof(buf), "%d/%d", s_page + 1, s_done_pages);
-    lv_label_set_text(pager, buf);
+    paginate(screen, content, pager);
     present(screen, SCR_DONE);
+}
+
+/* ---------- plan ---------- */
+
+static void on_plan_prev(lv_event_t *e) {
+    (void)e;
+    if (s_page > 0) {
+        s_page--;
+        show_plan();
+    }
+}
+
+static void on_plan_next(lv_event_t *e) {
+    (void)e;
+    if (s_page + 1 < s_done_pages) {
+        s_page++;
+        show_plan();
+    }
+}
+
+static void on_plan_approve(lv_event_t *e) {
+    (void)e;
+    await_ack(ct_proto_approve(s_sel.link, s_sel.id, s_req, true));
+}
+
+static void on_plan_change(lv_event_t *e) {
+    (void)e;
+    open_reply(REPLY_PLAN);
+}
+
+/* The agent wrote a plan and waits for it to be approved before touching anything. */
+static void show_plan(void) {
+    const ct_session_t *s = current();
+    if (s == NULL) {
+        session_gone();
+        return;
+    }
+    if (!wants_plan(s)) {
+        show_detail();
+        return;
+    }
+    if (s_screen != SCR_PLAN || strcmp(s_req, req_of(s)) != 0) {
+        s_page = 0;
+    }
+    snprintf(s_req, sizeof(s_req), "%s", req_of(s));
+    const ct_ask_t *ask = &s->ask;
+
+    lv_obj_t *screen = ct_screen_new();
+    header(screen, s, on_back_list);
+    agent_meta(screen, s, "写好了计划，批准后才动手");
+
+    lv_obj_t *content = ct_content(screen, CT_PAD);
+    lv_obj_set_style_pad_row(content, 7, 0);
+    lv_obj_set_style_pad_top(content, 10, 0);
+    for (int i = 0; i < ask->plan_count; i++) {
+        report_para(content, &ask->plan[i]);
+    }
+
+    lv_obj_t *hint = ct_row(screen, 32, CT_PAD, 0);
+    char buf[64];
+    if (ask->until > 0) {
+        char clock[8];
+        ct_fmt_clock(clock, sizeof(clock), ask->until);
+        snprintf(buf, sizeof(buf), "%s 前没批准，就要回电脑确认", clock);
+        ct_label(hint, F18, buf);
+    } else {
+        ct_label(hint, F18, "批准以后，每一步改动还会来问你");
+    }
+
+    lv_obj_t *bar = ct_bottom_bar(screen, 76);
+    ct_button(bar, "‹", MB24, 60, 56, false, on_plan_prev, NULL);
+    lv_obj_t *pager = ct_label(bar, MB20, "1/1");
+    ct_button(bar, "›", MB24, 60, 56, false, on_plan_next, NULL);
+    ct_spacer(bar);
+    ct_button(bar, "继续改", B20, 96, 56, false, on_plan_change, NULL);
+    ct_button(bar, "批准", B20, 80, 56, true, on_plan_approve, NULL);
+
+    paginate(screen, content, pager);
+    present(screen, SCR_PLAN);
 }
 
 /* ---------- reply ---------- */
@@ -1471,8 +1646,13 @@ static void show_done(void) {
 static void on_quick(lv_event_t *e) {
     const char *text = ct_model_quick(s_sel.link, (int)(intptr_t)lv_event_get_user_data(e));
     if (text != NULL) {
-        await_ack(ct_proto_reply(s_sel.link, s_sel.id, text));
+        send_words(text);
     }
+}
+
+static void on_send_back_plain(lv_event_t *e) {
+    (void)e;
+    await_ack(ct_proto_send_back(s_sel.link, s_sel.id, s_req, NULL));
 }
 
 static void on_hold_to_talk(lv_event_t *e) {
@@ -1489,13 +1669,21 @@ static void show_reply(void) {
     lv_obj_t *screen = ct_screen_new();
     status_bar(screen);
     lv_obj_t *nav = ct_nav(screen, s->name, on_back_from_reply);
-    ct_chip(nav, "回复", false, true);
+    ct_chip(nav, s_reply_mode == REPLY_ANSWER ? "回答" : s_reply_mode == REPLY_PLAN ? "改计划" : "回复", false, true);
     agent_meta(screen, s, state_text(s->state));
 
     lv_obj_t *content = ct_content(screen, CT_PAD);
     lv_obj_set_style_pad_row(content, 8, 0);
     lv_obj_set_style_pad_top(content, 12, 0);
 
+    if (s_reply_mode == REPLY_PLAN) {
+        /* Sending it back needs no words: it will think again on its own. */
+        lv_obj_t *plain = ct_row(content, 60, 14, 8);
+        ct_border(plain, 3, LV_BORDER_SIDE_FULL);
+        ct_label_fill(plain, B20, "不说理由，直接打回重想");
+        ct_label(plain, MB24, "›");
+        ct_tappable(plain, on_send_back_plain, NULL);
+    }
     if (ct_model_quick_count(s->link) > 0) {
         ct_section(content, "点一句直接发");
     }
@@ -1518,8 +1706,15 @@ static void show_reply(void) {
 
     lv_obj_t *hint = ct_row(screen, 44, CT_PAD, 0);
     lv_obj_set_flex_align(hint, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    ct_label(hint, F18, s->state == CT_STATE_RUNNING ? "它正在干活，这句话会排在当前这一步之后"
-                                                     : "按住机身上的 BOOT 键也一样");
+    const char *note = "按住机身上的 BOOT 键也一样";
+    if (s_reply_mode == REPLY_ANSWER) {
+        note = "这句话就是这道题的回答";
+    } else if (s_reply_mode == REPLY_PLAN) {
+        note = "计划会打回给它，按这句话改";
+    } else if (s->state == CT_STATE_RUNNING) {
+        note = "它正在干活，这句话会排在当前这一步之后";
+    }
+    ct_label(hint, F18, note);
     present(screen, SCR_REPLY);
 }
 
@@ -1527,7 +1722,7 @@ static void show_reply(void) {
 
 static void on_send(lv_event_t *e) {
     (void)e;
-    await_ack(ct_proto_reply(s_sel.link, s_sel.id, s_heard));
+    send_words(s_heard);
 }
 
 static void show_voice(void) {
@@ -1565,9 +1760,13 @@ static void show_voice(void) {
     }
 
     ct_section(content, "发出去之后");
-    ct_paragraph(content, F20,
-                 s->state == CT_STATE_RUNNING ? "这句话排在它当前这一步后面，不会打断正在进行的修改。"
-                                              : "它会马上开始按这句话去做。");
+    const char *after = s->state == CT_STATE_RUNNING ? "这句话排在它当前这一步后面，不会打断正在进行的修改。" : "它会马上开始按这句话去做。";
+    if (s_reply_mode == REPLY_ANSWER) {
+        after = "作为这道题的回答发给它，它接着往下做。";
+    } else if (s_reply_mode == REPLY_PLAN) {
+        after = "计划打回给它，它按这句话改好再拿来给你批。";
+    }
+    ct_paragraph(content, F20, after);
 
     lv_obj_t *bar = ct_bottom_bar(screen, 88);
     lv_obj_set_style_pad_column(bar, 12, 0);
@@ -1671,7 +1870,7 @@ static void announce_new_requests(void) {
     bool fresh = false;
     for (int i = 0; i < ct_model_count(); i++) {
         const ct_session_t *s = ct_model_at(i);
-        if (!wants_approval(s) && !wants_answer(s)) {
+        if (!wants_approval(s) && !wants_answer(s) && !wants_plan(s)) {
             continue;
         }
         const uint32_t h = hash_pair(s->id, req_of(s)) ^ ((uint32_t)s->link * 0x9E3779B9u);
@@ -1721,6 +1920,14 @@ static void follow_data(void) {
             open_session(s);
         } else {
             show_question();
+        }
+        break;
+    case SCR_PLAN:
+        if (!wants_plan(s) || strcmp(req_of(s), s_req) != 0) {
+            s_next_refresh = CT_REFRESH_FAST;
+            open_session(s);
+        } else {
+            show_plan();
         }
         break;
     case SCR_DONE:
@@ -1853,21 +2060,32 @@ void ct_ui_on_key(ct_key_t key, bool down) {
         if (s_screen == SCR_LIST) on_list_prev(NULL);
         else if (s_screen == SCR_DETAIL) on_detail_prev(NULL);
         else if (s_screen == SCR_DONE) on_done_prev(NULL);
+        else if (s_screen == SCR_PLAN) on_plan_prev(NULL);
         break;
     case CT_KEY_VOL_DOWN:
     case CT_KEY_NEXT:
         if (s_screen == SCR_LIST) on_list_next(NULL);
         else if (s_screen == SCR_DETAIL) on_detail_next(NULL);
         else if (s_screen == SCR_DONE) on_done_next(NULL);
+        else if (s_screen == SCR_PLAN) on_plan_next(NULL);
         break;
     case CT_KEY_BOOT: {
+        /* Talk: an answer on a question, what to change on a plan, else an instruction. */
         const ct_session_t *s = current();
-        if (s_screen != SCR_LIST && s != NULL && s->reply) {
-            if (s_screen != SCR_REPLY && s_screen != SCR_VOICE) {
-                s_reply_from = s_screen;
-            }
-            show_voice();
+        if (s_screen == SCR_LIST || s == NULL) {
+            break;
         }
+        if (s_screen != SCR_REPLY && s_screen != SCR_VOICE) {
+            const reply_mode_t mode = s_screen == SCR_QUESTION ? REPLY_ANSWER : s_screen == SCR_PLAN ? REPLY_PLAN : REPLY_SAY;
+            if (mode == REPLY_SAY && !s->reply) {
+                break;
+            }
+            s_reply_mode = mode;
+            s_reply_from = s_screen;
+        } else if (s_reply_mode == REPLY_SAY && !s->reply) {
+            break;
+        }
+        show_voice();
         break;
     }
     default:

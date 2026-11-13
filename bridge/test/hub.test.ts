@@ -30,8 +30,8 @@ function setup(over: Partial<SessionSnapshot> = {}, control: SessionControl = {}
   const hub = new Hub(clock);
   const calls: string[] = [];
   hub.put(snapshot(over), {
-    decide: (req, allow) => calls.push(`decide ${req} ${allow}`),
-    answer: (req, option) => calls.push(`answer ${req} ${option}`),
+    decide: (req, allow, text) => calls.push(`decide ${req} ${allow}${text ? ` ${text}` : ''}`),
+    answer: (req, choice) => calls.push(`answer ${req} ${'option' in choice ? choice.option : JSON.stringify(choice)}`),
     reply: (text) => calls.push(`reply ${text}`),
     ...control,
   });
@@ -81,6 +81,27 @@ test('answer checks the request and the option', () => {
   assert.equal(hub.act({ t: 'answer', seq: 2, id: 's1', req: 'r9', option: 0 }), 'stale');
   assert.equal(hub.act({ t: 'answer', seq: 3, id: 's1', req: 'r2', option: 1 }), null);
   assert.deepEqual(calls, ['answer r2 1']);
+});
+
+test('several options only for a multi-select question; own words for any', () => {
+  const single = setup({ state: 'question', ask: { kind: 'question', req: 'r2', text: '?', options: [{ label: 'a' }, { label: 'b' }] } });
+  assert.equal(single.hub.act({ t: 'answer', seq: 1, id: 's1', req: 'r2', options: [0, 1] }), 'bad');
+  assert.equal(single.hub.act({ t: 'answer', seq: 2, id: 's1', req: 'r2', text: '  ' }), 'bad');
+  assert.equal(single.hub.act({ t: 'answer', seq: 3, id: 's1', req: 'r2', text: ' 都不要 ' }), null);
+  assert.deepEqual(single.calls, ['answer r2 {"text":"都不要"}']);
+
+  const multi = setup({ state: 'question', ask: { kind: 'question', req: 'r3', text: '?', multi: true, options: [{ label: 'a' }, { label: 'b' }, { label: 'c' }] } });
+  assert.equal(multi.hub.act({ t: 'answer', seq: 1, id: 's1', req: 'r3', options: [0, 3] }), 'bad');
+  assert.equal(multi.hub.act({ t: 'answer', seq: 2, id: 's1', req: 'r3', options: [2, 0, 2] }), null);
+  assert.deepEqual(multi.calls, ['answer r3 {"options":[0,2]}'], 'in order, once each');
+});
+
+test('a plan is approved like a request, and can be sent back with what to change', () => {
+  const plan: Partial<SessionSnapshot> = { state: 'approve', ask: { kind: 'plan', req: 'p1', plan: [{ text: '先改 A' }], until: T0 + 600 } };
+  const { hub, calls } = setup(plan);
+  assert.equal(hub.act({ t: 'approve', seq: 1, id: 's1', req: 'p1', allow: true, text: '好' }), 'bad', 'words only go with a no');
+  assert.equal(hub.act({ t: 'approve', seq: 2, id: 's1', req: 'p1', allow: false, text: ' 先别动数据库 ' }), null);
+  assert.deepEqual(calls, ['decide p1 false 先别动数据库']);
 });
 
 test('reply is trimmed and length-checked', () => {

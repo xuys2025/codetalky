@@ -40,7 +40,7 @@ function checkSnapshot(s: SessionSnapshot): void {
   assert.ok(s.since >= s.started || s.state === 'approve' || s.state === 'question', `${where}: since after started`);
   switch (s.state) {
     case 'approve':
-      assert.equal(s.ask?.kind, 'approve', where);
+      assert.ok(s.ask?.kind === 'approve' || s.ask?.kind === 'plan', where);
       break;
     case 'question':
       assert.equal(s.ask?.kind, 'question', where);
@@ -148,6 +148,14 @@ test('blog-engine: every answer leads to a report', () => {
     const { hub, get, until, req } = demo();
     assert.equal(hub.act({ t: 'answer', seq: 1, id: 'blog-engine', req: req('blog-engine'), option }), null);
     assert.equal(get('blog-engine').log[1]?.verb, '答');
+    if (option === 0) {
+      // Storing it locally leads to a follow-up question where several answers can be picked.
+      until('second question', () => get('blog-engine').state === 'question');
+      const ask = get('blog-engine').ask;
+      assert.ok(ask?.kind === 'question' && ask.multi);
+      assert.equal(hub.act({ t: 'answer', seq: 2, id: 'blog-engine', req: ask.req, options: [0, 2] }), null);
+      assert.equal(get('blog-engine').log[1]?.target, '排序方式、展开的分组');
+    }
     until('report', () => get('blog-engine').state === 'done');
     return get('blog-engine').report?.[0]?.text;
   });
@@ -182,7 +190,26 @@ test('docs-site recovers after 50 s and cannot take instructions', () => {
   clock.advance(1_000);
   assert.equal(get('docs-site').state, 'running');
   assert.equal(get('docs-site').err, undefined);
+  // Before moving files around it shows its plan; approving it lets it go on.
+  until('plan', () => get('docs-site').state === 'approve', 120);
+  const ask = get('docs-site').ask;
+  assert.ok(ask?.kind === 'plan');
+  assert.equal(ask.plan[0]?.lead, '重排文档目录的计划');
+  assert.equal(hub.act({ t: 'approve', seq: 2, id: 'docs-site', req: ask.req, allow: true }), null);
+  assert.equal(get('docs-site').log[0]?.target, '已批准');
   until('report', () => get('docs-site').state === 'done', 120);
+  assert.ok(get('docs-site').log.some((e) => e.verb === 'Edit' && e.target === 'config.ts'));
+});
+
+test('docs-site: a plan sent back with what to change', () => {
+  const { hub, get, until } = demo();
+  until('plan', () => get('docs-site').state === 'approve', 200);
+  const ask = get('docs-site').ask!;
+  assert.equal(hub.act({ t: 'approve', seq: 1, id: 'docs-site', req: ask.req, allow: false, text: '目录先别动' }), null);
+  until('report', () => get('docs-site').state === 'done', 120);
+  const targets = get('docs-site').log.map((e) => e.target);
+  assert.ok(targets.includes('打回：目录先别动'));
+  assert.ok(!get('docs-site').log.some((e) => e.verb === 'Edit' && e.target === 'config.ts'), 'nothing moved');
 });
 
 test('api-server: a reply starts another round, quick replies do what they say', () => {

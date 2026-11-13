@@ -350,6 +350,8 @@ static void parse_hunks(ct_arena_t *a, ct_session_t *s, const cJSON *obj) {
     }
 }
 
+static const ct_para_t *parse_paras(ct_arena_t *a, const cJSON *arr, int *count);
+
 static void parse_ask(ct_arena_t *a, ct_session_t *s, const cJSON *obj) {
     const char *kind = raw_string(obj, "kind");
     const char *req = raw_string(obj, "req");
@@ -370,10 +372,15 @@ static void parse_ask(ct_arena_t *a, ct_session_t *s, const cJSON *obj) {
         ask->why = opt_str(a, obj, "why", LEN_TEXT);
         ask->until = time_of(obj, "until");
         ask->risky = cJSON_IsTrue(field(obj, "risky"));
+    } else if (strcmp(kind, "plan") == 0) {
+        ask->kind = CT_ASK_PLAN;
+        ask->plan = parse_paras(a, field(obj, "plan"), &ask->plan_count);
+        ask->until = time_of(obj, "until");
     } else if (strcmp(kind, "question") == 0) {
         ask->kind = CT_ASK_QUESTION;
         ask->text = str(a, obj, "text", LEN_TEXT);
         ask->note = opt_str(a, obj, "note", LEN_TEXT);
+        ask->multi = cJSON_IsTrue(field(obj, "multi"));
         const cJSON *arr = field(obj, "options");
         const int n = array_len(arr, MAX_OPTIONS);
         ct_option_t *options = n > 0 ? ct_arena_alloc(a, (size_t)n * sizeof(*options)) : NULL;
@@ -394,11 +401,13 @@ static void parse_ask(ct_arena_t *a, ct_session_t *s, const cJSON *obj) {
     }
 }
 
-static void parse_report(ct_arena_t *a, ct_session_t *s, const cJSON *arr) {
+/* Paragraphs of a report or a plan. */
+static const ct_para_t *parse_paras(ct_arena_t *a, const cJSON *arr, int *count) {
+    *count = 0;
     const int n = array_len(arr, MAX_REPORT);
     ct_para_t *paras = n > 0 ? ct_arena_alloc(a, (size_t)n * sizeof(*paras)) : NULL;
     if (paras == NULL) {
-        return;
+        return NULL;
     }
     int i = 0;
     const cJSON *e;
@@ -410,8 +419,12 @@ static void parse_report(ct_arena_t *a, ct_session_t *s, const cJSON *arr) {
         paras[i].text = str(a, e, "text", LEN_TEXT);
         i++;
     }
-    s->report = paras;
-    s->report_count = i;
+    *count = i;
+    return paras;
+}
+
+static void parse_report(ct_arena_t *a, ct_session_t *s, const cJSON *arr) {
+    s->report = parse_paras(a, arr, &s->report_count);
 }
 
 static ct_session_t *parse_session(const cJSON *j) {
@@ -716,6 +729,39 @@ uint32_t ct_proto_answer(int link, const char *id, const char *req, int option) 
     if (msg != NULL) {
         cJSON_AddStringToObject(msg, "req", req);
         cJSON_AddNumberToObject(msg, "option", option);
+    }
+    return send_action(link, msg);
+}
+
+uint32_t ct_proto_send_back(int link, const char *id, const char *req, const char *text) {
+    cJSON *msg = action(link, "approve", id);
+    if (msg != NULL) {
+        cJSON_AddStringToObject(msg, "req", req);
+        cJSON_AddBoolToObject(msg, "allow", false);
+        if (text != NULL && text[0] != '\0') {
+            cJSON_AddStringToObject(msg, "text", text);
+        }
+    }
+    return send_action(link, msg);
+}
+
+uint32_t ct_proto_answer_many(int link, const char *id, const char *req, const int *options, int count) {
+    cJSON *msg = action(link, "answer", id);
+    if (msg != NULL) {
+        cJSON_AddStringToObject(msg, "req", req);
+        cJSON *list = cJSON_AddArrayToObject(msg, "options");
+        for (int i = 0; list != NULL && i < count; i++) {
+            cJSON_AddItemToArray(list, cJSON_CreateNumber(options[i]));
+        }
+    }
+    return send_action(link, msg);
+}
+
+uint32_t ct_proto_answer_text(int link, const char *id, const char *req, const char *text) {
+    cJSON *msg = action(link, "answer", id);
+    if (msg != NULL) {
+        cJSON_AddStringToObject(msg, "req", req);
+        cJSON_AddStringToObject(msg, "text", text);
     }
     return send_action(link, msg);
 }

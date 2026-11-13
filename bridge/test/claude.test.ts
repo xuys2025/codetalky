@@ -189,6 +189,65 @@ test('a question with two parts is answered one part at a time', async () => {
   );
 });
 
+test('several options picked, or the user’s own words, in the answer Claude expects', async () => {
+  const { hub, send, get } = setup();
+  const questions = [
+    { question: '要支持哪些格式？', header: '格式', options: [{ label: 'CSV' }, { label: 'JSON' }, { label: 'XML' }], multiSelect: true },
+    { question: '放在哪个菜单？', header: '菜单', options: [{ label: '文件' }, { label: '工具' }], multiSelect: false },
+  ];
+  const reply = send('PreToolUse', { tool_name: 'AskUserQuestion', tool_input: { questions } });
+  await settled(reply);
+  let ask = get().ask;
+  assert.ok(ask?.kind === 'question');
+  assert.equal(ask.multi, true);
+  assert.equal(ask.note, '第 1/2 题 · 格式 · 可以多选');
+  assert.equal(hub.act({ t: 'answer', seq: 1, id: SID, req: ask.req, options: [2, 0] }), null);
+  ask = get().ask;
+  assert.ok(ask?.kind === 'question');
+  assert.equal(ask.multi, undefined);
+  assert.equal(hub.act({ t: 'answer', seq: 2, id: SID, req: ask.req, text: '右键菜单里' }), null);
+  const answers = ((await reply).body as { hookSpecificOutput: { updatedInput: { answers: unknown } } }).hookSpecificOutput.updatedInput.answers;
+  assert.deepEqual(answers, { '要支持哪些格式？': 'CSV, XML', '放在哪个菜单？': '右键菜单里' });
+});
+
+test('a plan: shown in full, approved (each step still asks), or sent back with what to change', async () => {
+  const { hub, send, get } = setup();
+  const plan = '## 计划\n\n1. 给购物车加数量字段\n2. 改总价计算\n3. 补测试';
+  const input = { plan, planFilePath: 'C:\\Users\\x\\.claude\\plans\\p.md' };
+  let reply = send('PermissionRequest', { tool_name: 'ExitPlanMode', tool_input: input });
+  await settled(reply);
+  let ask = get().ask;
+  assert.equal(get().state, 'approve');
+  assert.ok(ask?.kind === 'plan');
+  assert.deepEqual(ask.plan.map((p) => p.text), ['计划', '给购物车加数量字段', '改总价计算', '补测试']);
+  assert.equal(ask.until, T0 + 300);
+  assert.deepEqual(get().now, { verb: '计划', target: '计划' });
+
+  // Sent back: Claude keeps planning, with the user's words.
+  assert.equal(hub.act({ t: 'approve', seq: 1, id: SID, req: ask.req, allow: false, text: '先别动数据库' }), null);
+  assert.deepEqual((await reply).body, {
+    hookSpecificOutput: {
+      hookEventName: 'PermissionRequest',
+      decision: { behavior: 'deny', message: '用户在 CodeTalky 设备上看了计划，要你改：先别动数据库' },
+    },
+  });
+  assert.equal(get().log[0]!.target, '打回：先别动数据库');
+
+  // The revised plan, approved.
+  reply = send('PermissionRequest', { tool_name: 'ExitPlanMode', tool_input: input });
+  await settled(reply);
+  ask = get().ask;
+  assert.ok(ask?.kind === 'plan');
+  assert.equal(hub.act({ t: 'approve', seq: 2, id: SID, req: ask.req, allow: true }), null);
+  assert.deepEqual((await reply).body, {
+    hookSpecificOutput: {
+      hookEventName: 'PermissionRequest',
+      decision: { behavior: 'allow', updatedInput: input, updatedPermissions: [{ type: 'setMode', mode: 'default', destination: 'session' }] },
+    },
+  });
+  assert.deepEqual([get().state, get().log[0]!.target], ['running', '已批准']);
+});
+
 test('a round of work: prompt, tools, todos, report', async () => {
   const { send, get, hub } = setup();
   await send('SessionStart', { source: 'startup', model: 'claude-opus-5-5' });

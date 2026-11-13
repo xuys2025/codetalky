@@ -30,8 +30,10 @@ export interface LinkOptions {
   flushMs: number;
   /** Swap characters the device can't draw (see glyphs.ts). Default: send as is. */
   fixText?: (text: string) => string;
-  /** Devices must show a token or pair first. Unset for connections from this machine. */
+  /** Devices must prove they hold their pairing key, or pair first. Unset for connections from this machine. */
   pairing?: Pairing;
+  /** Where the random bytes for challenges and pairing come from. Only for repeatable screenshots; default: the OS. */
+  entropy?: (bytes: number) => Buffer;
 }
 
 export const DEFAULT_QUICK = ['继续下一步', '跑一下测试', '提交这些改动', '先停一下，等我回电脑', '撤销刚才的修改'];
@@ -132,7 +134,8 @@ export class DeviceLink {
   private askAuth(bad: boolean): void {
     this.cancelPair?.();
     this.cancelPair = null;
-    const c: Challenge = { nonce: random(), keys: newKeyPair(), r: random(), spent: false };
+    const take = this.options.entropy ?? random;
+    const c: Challenge = { nonce: take(16), keys: newKeyPair(this.options.entropy ? take(32) : undefined), r: take(16), spent: false };
     this.challenge = c;
     this.send({
       t: 'auth',

@@ -3,14 +3,14 @@
 // links read them and send the user's actions back through act().
 
 import type { Clock } from './clock.ts';
-import { LIMITS, type AckError, type DeviceAction, type SessionSnapshot } from './protocol.ts';
+import { LIMITS, type AckError, type Choice, type DeviceAction, type SessionSnapshot } from './protocol.ts';
 
 /** How a source carries out the user's actions on one of its sessions. */
 export interface SessionControl {
-  /** Answer the pending permission request. */
-  decide?(req: string, allow: boolean): void;
-  /** Answer the pending question with one of its options. */
-  answer?(req: string, option: number): void;
+  /** Answer the pending permission request or plan. text: for a plan sent back, what to change. */
+  decide?(req: string, allow: boolean, text?: string): void;
+  /** Answer the pending question: an option, several, or the user's own words. */
+  answer?(req: string, choice: Choice): void;
   /** Give the agent a new instruction. */
   reply?(text: string): void;
 }
@@ -100,18 +100,33 @@ export class Hub {
       case 'approve': {
         const ask = snapshot.ask;
         // The request shown on the device must be the one still pending.
-        if (snapshot.state !== 'approve' || ask?.kind !== 'approve' || ask.req !== action.req) return 'stale';
+        if (snapshot.state !== 'approve' || (ask?.kind !== 'approve' && ask?.kind !== 'plan') || ask.req !== action.req) return 'stale';
         if (ask.until !== undefined && this.nowSeconds() > ask.until) return 'stale';
+        const text = action.text?.trim();
+        if (text !== undefined && (text.length > LIMITS.replyText || action.allow)) return 'bad';
         if (!control.decide) return 'unsupported';
-        control.decide(action.req, action.allow);
+        control.decide(action.req, action.allow, text || undefined);
         return null;
       }
       case 'answer': {
         const ask = snapshot.ask;
         if (snapshot.state !== 'question' || ask?.kind !== 'question' || ask.req !== action.req) return 'stale';
-        if (action.option < 0 || action.option >= ask.options.length) return 'bad';
+        const inRange = (o: number) => o >= 0 && o < ask.options.length;
+        let choice: Choice;
+        if ('option' in action) {
+          if (!inRange(action.option)) return 'bad';
+          choice = { option: action.option };
+        } else if ('options' in action) {
+          const picked = [...new Set(action.options)].sort((a, b) => a - b);
+          if (!ask.multi || !picked.every(inRange)) return 'bad';
+          choice = { options: picked };
+        } else {
+          const text = action.text.trim();
+          if (text.length === 0 || text.length > LIMITS.replyText) return 'bad';
+          choice = { text };
+        }
         if (!control.answer) return 'unsupported';
-        control.answer(action.req, action.option);
+        control.answer(action.req, choice);
         return null;
       }
       case 'reply': {

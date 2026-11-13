@@ -66,7 +66,7 @@
     "list": [ { "file": "display/epd_driver.c", "line": 214, "add": 5, "del": 1,
                 "lines": [" static int partial_n;", "-  epd_refresh(PARTIAL);", "+  if (++partial_n >= 8) {"] } ]
   },
-  "ask": { /* state 是 approve 或 question 时才有，见下 */ },
+  "ask": { /* state 是 approve（批准或计划）或 question 时才有，见下 */ },
   "report": [               // state 是 done 时的完成汇报，一段一项
     { "text": "给订单列表接口加了分页。" },
     { "b": true, "lead": "接口", "text": "：新增 page 和 size 两个参数。" }
@@ -92,8 +92,20 @@
 ```jsonc
 "ask": { "kind": "question", "req": "r13", "text": "用户保存的筛选条件，存在哪里？",
          "note": "三种做法成本不一样。",
-         "options": [ { "label": "浏览器本地", "desc": "最简单，换设备就没了" } ] }
+         "options": [ { "label": "浏览器本地", "desc": "最简单，换设备就没了" } ],
+         "multi": false }
 ```
+
+`multi` 为真时可以选几个，设备上打勾后点“确定”一起发。不管单选多选，都可以不选选项，用自己的话回答。
+
+等批准计划（Claude 的计划模式：计划写好了，批准后才动手；`state` 是 `approve`）：
+
+```jsonc
+"ask": { "kind": "plan", "req": "r14", "until": 1794638400,
+         "plan": [ { "lead": "重排文档目录的计划", "text": "" }, { "text": "1. 把“指南”拆成两组……" } ] }
+```
+
+`plan` 的段落格式和完成汇报的 `report` 一样（最多 24 段）。设备上可以批准，也可以打回去让它接着改，打回时可以附一句要改什么。
 
 ## 配对（局域网里的设备）
 
@@ -126,13 +138,18 @@
 ```jsonc
 { "t": "hello", "proto": 1, "device": "sim", "deviceId": "212762a261d37f1f" }
 { "t": "approve", "seq": 7, "id": "会话号", "req": "r12", "allow": true }
+{ "t": "approve", "seq": 7, "id": "会话号", "req": "r14", "allow": false, "text": "先别动数据库" }
 { "t": "answer",  "seq": 8, "id": "会话号", "req": "r13", "option": 0 }
+{ "t": "answer",  "seq": 8, "id": "会话号", "req": "r13", "options": [0, 2] }
+{ "t": "answer",  "seq": 8, "id": "会话号", "req": "r13", "text": "放进网址参数" }
 { "t": "reply",   "seq": 9, "id": "会话号", "text": "继续下一步" }
 { "t": "seen",    "seq": 10, "id": "会话号" }
 ```
 
 - `seq` 由设备自己编号，电脑在 `ack` 里原样带回。
 - `approve` 和 `answer` 必须带上屏幕上显示的那个 `req`。电脑发现它和当前等待的请求对不上就拒绝（`stale`），防止批准到另一个请求上。
+- `approve` 也用来批准或打回计划；`text` 只能跟 `"allow": false` 一起，是打回计划时要它改什么。
+- `answer` 三选一：`option`（一个选项）、`options`（多选题，选了几个）、`text`（都不是，用户自己的话）。`options` 只有 `multi` 的问题才收。
 - `reply` 是发一句新指令，快速回复和语音识别出的文字都走它。
 - `seen` 表示完成汇报看过了，会话从 `done` 变成 `idle`。
 

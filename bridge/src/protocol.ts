@@ -55,6 +55,17 @@ export interface QuestionAsk {
   text: string;
   note?: string;
   options: { label: string; desc?: string }[];
+  /** Several options may be picked (sent together with "确定"). */
+  multi?: boolean;
+}
+
+/** The agent's plan, waiting to be approved before it starts (Claude Code's plan mode). */
+export interface PlanAsk {
+  kind: 'plan';
+  req: string;
+  /** The plan, as paragraphs like a report. */
+  plan: Para[];
+  until?: number;
 }
 
 /** One paragraph of the agent's final message. */
@@ -83,7 +94,7 @@ export interface SessionSnapshot {
   log: LogEntry[];
   files: FileChange[];
   hunks: { total: number; list: Hunk[] };
-  ask?: ApproveAsk | QuestionAsk;
+  ask?: ApproveAsk | QuestionAsk | PlanAsk;
   report?: Para[];
   err?: string;
 }
@@ -108,9 +119,13 @@ export type ToDevice =
   /** The user approved the code on the computer. The first encrypted frame. */
   | { t: 'paired' };
 
+/** An answer to a question: one option, several (multi), or the user's own words. */
+export type Choice = { option: number } | { options: number[] } | { text: string };
+
 export type DeviceAction =
-  | { t: 'approve'; seq: number; id: string; req: string; allow: boolean }
-  | { t: 'answer'; seq: number; id: string; req: string; option: number }
+  /** text: for a plan sent back, what to change. */
+  | { t: 'approve'; seq: number; id: string; req: string; allow: boolean; text?: string }
+  | ({ t: 'answer'; seq: number; id: string; req: string } & Choice)
   | { t: 'reply'; seq: number; id: string; text: string }
   | { t: 'seen'; seq: number; id: string };
 
@@ -161,10 +176,19 @@ export function parseFromDevice(text: string): FromDevice | null {
   switch (msg.t) {
     case 'approve':
       if (typeof msg.req !== 'string' || typeof msg.allow !== 'boolean') return null;
-      return { t: 'approve', ...base, req: msg.req, allow: msg.allow };
-    case 'answer':
-      if (typeof msg.req !== 'string' || typeof msg.option !== 'number' || !Number.isInteger(msg.option)) return null;
-      return { t: 'answer', ...base, req: msg.req, option: msg.option };
+      if (msg.text !== undefined && typeof msg.text !== 'string') return null;
+      return { t: 'approve', ...base, req: msg.req, allow: msg.allow, ...(typeof msg.text === 'string' ? { text: msg.text } : {}) };
+    case 'answer': {
+      if (typeof msg.req !== 'string') return null;
+      const given = [msg.option, msg.options, msg.text].filter((v) => v !== undefined).length;
+      if (given !== 1) return null;
+      if (typeof msg.option === 'number' && Number.isInteger(msg.option)) return { t: 'answer', ...base, req: msg.req, option: msg.option };
+      if (Array.isArray(msg.options) && msg.options.length > 0 && msg.options.every((o) => typeof o === 'number' && Number.isInteger(o))) {
+        return { t: 'answer', ...base, req: msg.req, options: msg.options as number[] };
+      }
+      if (typeof msg.text === 'string') return { t: 'answer', ...base, req: msg.req, text: msg.text };
+      return null;
+    }
     case 'reply':
       if (typeof msg.text !== 'string') return null;
       return { t: 'reply', ...base, text: msg.text };

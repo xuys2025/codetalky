@@ -4,7 +4,7 @@
 
 import type { Clock } from '../clock.ts';
 import type { Hub } from '../hub.ts';
-import { LIMITS, type ApproveAsk, type Hunk, type LogEntry, type Para, type SessionSnapshot } from '../protocol.ts';
+import { LIMITS, type ApproveAsk, type Choice, type Hunk, type LogEntry, type Para, type SessionSnapshot } from '../protocol.ts';
 
 type AskBody = Pick<ApproveAsk, 'verb' | 'target' | 'add' | 'del' | 'line' | 'lines' | 'why' | 'risky'>;
 
@@ -25,7 +25,9 @@ export type Step =
   | { do: 'todo'; done: number }
   /** `ago` backdates the wait, for sessions that are already waiting when the demo opens. */
   | { do: 'approve'; ask: AskBody; allow: Step[]; deny: Step[]; ago?: number }
-  | { do: 'question'; text: string; note?: string; options: { label: string; desc?: string; then: Step[] }[]; ago?: number }
+  | { do: 'question'; text: string; note?: string; multi?: boolean; options: { label: string; desc?: string; then: Step[] }[]; ago?: number }
+  /** A plan waiting to be approved (Claude's plan mode); sent back, it goes on with `sendBack`. */
+  | { do: 'plan'; plan: Para[]; approve: Step[]; sendBack: Step[]; ago?: number }
   | { do: 'done'; report: Para[]; ago?: number }
   /** Stops until the user replies, or by itself after `retryAfter` seconds. */
   | { do: 'error'; text: string; retryAfter?: number; ago?: number };
@@ -99,7 +101,7 @@ export class FakeAgent {
   private readonly id: string;
   private queue: Step[];
   /** The step the agent is stopped on, if any. */
-  private blocked: Extract<Step, { do: 'approve' | 'question' | 'done' | 'error' }> | null = null;
+  private blocked: Extract<Step, { do: 'approve' | 'question' | 'plan' | 'done' | 'error' }> | null = null;
   private cancelTimer: (() => void) | null = null;
   private nextReq = 1;
 
@@ -111,7 +113,7 @@ export class FakeAgent {
     const snapshot = script.initial(hub.nowSeconds());
     this.id = snapshot.id;
     hub.put(snapshot, {
-      decide: (req, allow) => this.decide(req, allow),
+      decide: (req, allow, text) => this.decide(req, allow, text),
       answer: (req, option) => this.answer(req, option),
       reply: (text) => this.reply(text),
     });
@@ -210,7 +212,25 @@ export class FakeAgent {
             text: step.text,
             note: step.note,
             options: step.options.map(({ label, desc }) => ({ label, desc })),
+            ...(step.multi ? { multi: true } : {}),
           };
+        });
+        break;
+      }
+      case 'plan': {
+        const since = now - (step.ago ?? 0);
+        const req = `r${this.nextReq++}`;
+        this.blocked = step;
+        this.change((s) => {
+          s.state = 'approve';
+          s.since = since;
+          s.now = { verb: '计划', target: `${step.plan[0]?.lead ?? ''}${step.plan[0]?.text ?? ''}` };
+          s.ask = { kind: 'plan', req, plan: step.plan, until: since + APPROVE_TIMEOUT_S };
+        });
+        this.wait(since + APPROVE_TIMEOUT_S - now, () => {
+          this.queue.unshift({ do: 'say', text: '没等到批准，回电脑确认计划。' }, ...step.sendBack);
+          this.change((s) => this.resume(s));
+          this.next();
         });
         break;
       }
@@ -245,8 +265,19 @@ export class FakeAgent {
     if (s.ctx !== undefined) s.ctx = Math.min(95, s.ctx + 1);
   }
 
-  private decide(_req: string, allow: boolean): void {
+  private decide(_req: string, allow: boolean, text?: string): void {
     const step = this.blocked;
+    if (step?.do === 'plan') {
+      this.cancelTimer?.();
+      this.cancelTimer = null;
+      this.queue.unshift(...(allow ? step.approve : [...(text ? [{ do: 'say' as const, text: `按你的意见改：${text}` }] : []), ...step.sendBack]));
+      this.change((s) => {
+        this.log(s, allow ? { verb: '计划', target: '已批准' } : { verb: '计划', target: text ? `打回：${text}` : '打回重做', bad: true });
+        this.resume(s);
+      });
+      this.next();
+      return;
+    }
     if (step?.do !== 'approve') return;
     this.cancelTimer?.();
     this.cancelTimer = null;
@@ -258,14 +289,18 @@ export class FakeAgent {
     this.next();
   }
 
-  private answer(_req: string, option: number): void {
+  private answer(_req: string, choice: Choice): void {
     const step = this.blocked;
     if (step?.do !== 'question') return;
+    // The script only knows how to go on from its options: several, or the user's own
+    // words, go on as the first one picked (or the first one).
+    const option = 'option' in choice ? choice.option : 'options' in choice ? (choice.options[0] ?? 0) : 0;
     const chosen = step.options[option];
     if (!chosen) return;
+    const said = 'text' in choice ? choice.text : 'options' in choice ? choice.options.map((i) => step.options[i]?.label ?? '').join('、') : chosen.label;
     this.queue.unshift(...chosen.then);
     this.change((s) => {
-      this.log(s, { verb: '答', target: chosen.label });
+      this.log(s, { verb: '答', target: said });
       this.resume(s);
     });
     this.next();

@@ -470,6 +470,18 @@ function blogEngine(): FakeScript {
                   '   return [f, setF];',
                 ],
               }),
+              {
+                do: 'question',
+                text: '除了筛选条件，列表页还要记住哪些？',
+                note: '可以多选，存的方法一样。',
+                multi: true,
+                options: [
+                  { label: '排序方式', desc: '按时间还是按热度', then: [] },
+                  { label: '每页条数', then: [] },
+                  { label: '展开的分组', desc: '左侧哪些分组是打开的', then: [] },
+                ],
+              },
+              say('好，这几样一起存。'),
               todo(3),
               write('src/lib/filterStore.test.ts', 40),
               bash('pnpm test', '9 个全过', 9),
@@ -950,6 +962,22 @@ function apiServer(): FakeScript {
 
 // ---- docs-site: stopped by an error, can't take instructions -------------
 
+/** The end of docs-site's work, whichever way its plan went. */
+function docsFinish(): Step[] {
+  return [
+    bash('pnpm docs:build', '通过', 15),
+    todo(5),
+    done([
+      p('文档站整理完了，可以发布。'),
+      p('这次改了这些：'),
+      li('安装说明', '写明要 Node 22，补了全局安装和检查版本两步。'),
+      li('死链', '修了 2 处，现在全站没有死链。'),
+      li('构建', '站点生成通过。'),
+      p('中途被接口限流停了一次，恢复后从第 4 步接着做的。'),
+    ]),
+  ];
+}
+
 function docsSite(): FakeScript {
   return {
     initial: (t0) =>
@@ -1009,16 +1037,27 @@ function docsSite(): FakeScript {
       }),
       bash('pnpm docs:links', '没有死链', 10),
       todo(4),
-      bash('pnpm docs:build', '通过', 15),
-      todo(5),
-      done([
-        p('文档站整理完了，可以发布。'),
-        p('这次改了这些：'),
-        li('安装说明', '写明要 Node 22，补了全局安装和检查版本两步。'),
-        li('死链', '修了 2 处，现在全站没有死链。'),
-        li('构建', '站点生成通过。'),
-        p('中途被接口限流停了一次，恢复后从第 4 步接着做的。'),
-      ]),
+      say('死链修好了。目录要重排，动的文件多，我先写个计划给你看。'),
+      {
+        do: 'plan',
+        plan: [
+          { lead: '重排文档目录的计划', text: '' },
+          p('1. 把“指南”拆成“上手”和“进阶”两组，上手放安装、配置、部署，进阶放钩子、API 和升级。'),
+          p('2. 侧边栏按新分组重写，首页的入口链接跟着改。'),
+          p('3. 旧地址加跳转，免得别处链过来的地址失效。'),
+          p('4. 重新检查死链，再生成站点。'),
+          p('要动 14 个文件，只挪位置，不改正文内容。'),
+        ],
+        approve: [
+          edit('docs/.vitepress/config.ts', 22, 9, {
+            line: 18,
+            lines: [" sidebar: {", "-  '/guide/': guide,", "+  '/start/': start,", "+  '/advanced/': advanced,", ' },'],
+          }),
+          bash('pnpm docs:links', '没有死链', 10),
+          ...docsFinish(),
+        ],
+        sendBack: [say('好，目录先不动，只交付死链的修复。'), ...docsFinish()],
+      },
     ],
     followUp: followUp({ test: 'pnpm docs:build', commit: '整理文档站', next: [] }),
   };
