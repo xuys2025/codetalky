@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 #include "ct_hal.h"
+#include "ct_proto.h"
 #include "ct_ui.h"
 #include "lvgl.h"
 
@@ -48,6 +49,14 @@ void ct_hal_vibrate(uint16_t ms) {
 
 bool ct_hal_net_send(int link, const char *json) {
     return js_net_send(link, json) != 0;
+}
+
+EM_JS(void, js_net_close, (int link), {
+    if (Module.onNetClose) Module.onNetClose(link);
+});
+
+void ct_hal_net_close(int link) {
+    js_net_close(link);
 }
 
 /* Settings live wherever the page puts them (localStorage in the browser). */
@@ -144,6 +153,12 @@ void sim_key(int key, int down) {
     if (key >= 0 && key < CT_KEY_COUNT) {
         ct_ui_on_key((ct_key_t)key, down != 0);
     }
+}
+
+/* The pairing code the device shows for a link ("" if none), for tools that play the user. */
+EMSCRIPTEN_KEEPALIVE
+const char *sim_pair_code(int link) {
+    return ct_proto_pairing(link) ? ct_proto_pair_code(link) : "";
 }
 
 /* The page's WebSocket to one computer's bridge opened (1) or closed (0). */

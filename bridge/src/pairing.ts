@@ -1,12 +1,9 @@
 // Pairing: a device on the network may connect only after the user has said yes on
-// this computer. The device shows a six-digit code; the user runs
-// `codetalky pair <code>` here; the bridge then gives the device a token it presents
-// from then on. Only a hash of each token is kept, in ~/.codetalky/devices.json.
-//
-// Known limit: the token travels over plain WebSocket. Anyone who can sniff the
-// network could replay it. A challenge-response (HMAC over a nonce) would fix that.
+// this computer. The device shows a six-digit code that both sides compute from the
+// pairing exchange (see secure.ts); the user runs `codetalky pair <code>` here, which
+// only matches if nobody sat in the middle. Both sides then hold the same pairing
+// key, which never crosses the network. Keys are kept in ~/.codetalky/devices.json.
 
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -18,8 +15,8 @@ const REQUEST_TTL_MS = 5 * 60 * 1000;
 export interface PairedDevice {
   id: string;
   name: string;
-  /** sha256 of the token, hex. */
-  hash: string;
+  /** The pairing key, hex. Whoever has it can act as this device: the file is private to this user. */
+  key: string;
   pairedAt: number;
 }
 
@@ -27,12 +24,11 @@ interface Request {
   deviceId: string;
   name: string;
   code: string;
+  key: Buffer;
   since: number;
-  grant: (token: string) => void;
+  grant: () => void;
   cancelExpiry: () => void;
 }
-
-const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 
 export class Pairing {
   private readonly file: string;
@@ -48,27 +44,23 @@ export class Pairing {
     this.devices = this.load();
   }
 
-  /** Is this the token the device was given? */
-  check(deviceId: string, token: string): boolean {
+  /** The key this device was paired with, if it is paired. */
+  keyOf(deviceId: string): Buffer | null {
     const d = this.devices.find((x) => x.id === deviceId);
-    if (!d || !/^[0-9a-f]{64}$/.test(token)) return false;
-    return timingSafeEqual(Buffer.from(d.hash, 'hex'), Buffer.from(sha256(token), 'hex'));
+    return d ? Buffer.from(d.key, 'hex') : null;
   }
 
-  /** A device asks to pair. grant() is called with its token if the user approves. Returns cancel. */
-  request(deviceId: string, name: string, code: string, grant: (token: string) => void): () => void {
+  /**
+   * A device asks to pair. code is what both sides computed; key is what this
+   * computer will keep if the user approves, and grant() is called then. Returns cancel.
+   */
+  request(deviceId: string, name: string, code: string, key: Buffer, grant: () => void): () => void {
     this.drop(deviceId);
-    const req: Request = {
-      deviceId,
-      name,
-      code,
-      since: this.clock.now(),
-      grant,
-      cancelExpiry: () => {},
-    };
+    const req: Request = { deviceId, name, code, key, since: this.clock.now(), grant, cancelExpiry: () => {} };
     req.cancelExpiry = this.clock.after(REQUEST_TTL_MS, () => this.drop(deviceId));
     this.requests.push(req);
-    this.log(`device "${name}" wants to pair. If its screen shows ${code}, run: codetalky pair ${code}`);
+    // The code is not printed: the user has to read it off the device, or the check means nothing.
+    this.log(`device "${name}" wants to pair: run codetalky pair <the code on its screen>`);
     return () => this.drop(deviceId, req);
   }
 
@@ -76,25 +68,24 @@ export class Pairing {
     return this.requests.map(({ deviceId, name, code, since }) => ({ deviceId, name, code, since }));
   }
 
-  /** The user said yes to the device showing this code. */
+  /** The user typed the code the device shows. */
   approve(code: string): { deviceId: string; name: string } | null {
     const req = this.requests.find((r) => r.code === code);
     if (!req) return null;
     this.drop(req.deviceId, req);
-    const token = randomBytes(32).toString('hex');
     this.devices = this.devices.filter((d) => d.id !== req.deviceId);
-    this.devices.push({ id: req.deviceId, name: req.name, hash: sha256(token), pairedAt: Math.floor(this.clock.now() / 1000) });
+    this.devices.push({ id: req.deviceId, name: req.name, key: req.key.toString('hex'), pairedAt: Math.floor(this.clock.now() / 1000) });
     this.save();
     this.log(`paired device "${req.name}"`);
-    req.grant(token);
+    req.grant();
     return { deviceId: req.deviceId, name: req.name };
   }
 
-  list(): PairedDevice[] {
-    return [...this.devices];
+  list(): { id: string; name: string; pairedAt: number }[] {
+    return this.devices.map(({ id, name, pairedAt }) => ({ id, name, pairedAt }));
   }
 
-  /** Forget a device by id or name. Its token stops working. */
+  /** Forget a device by id or name. It has to pair again. */
   remove(idOrName: string): boolean {
     const before = this.devices.length;
     this.devices = this.devices.filter((d) => d.id !== idOrName && d.name !== idOrName);
@@ -116,8 +107,9 @@ export class Pairing {
   private load(): PairedDevice[] {
     try {
       const data = JSON.parse(readFileSync(this.file, 'utf8')) as { devices?: unknown };
+      // Devices paired the old way (a token's hash, before 11-14) have to pair again.
       return Array.isArray(data.devices)
-        ? (data.devices as PairedDevice[]).filter((d) => typeof d.id === 'string' && /^[0-9a-f]{64}$/.test(d.hash))
+        ? (data.devices as PairedDevice[]).filter((d) => typeof d.id === 'string' && typeof d.key === 'string' && /^[0-9a-f]{64}$/.test(d.key))
         : [];
     } catch {
       return [];
@@ -126,6 +118,6 @@ export class Pairing {
 
   private save(): void {
     mkdirSync(dirname(this.file), { recursive: true });
-    writeFileSync(this.file, `${JSON.stringify({ devices: this.devices }, null, 2)}\n`);
+    writeFileSync(this.file, `${JSON.stringify({ devices: this.devices }, null, 2)}\n`, { mode: 0o600 });
   }
 }

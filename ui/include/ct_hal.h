@@ -32,15 +32,20 @@ void ct_hal_vibrate(uint16_t ms);
 /* Send one text frame (JSON) to the bridge on a link (one per computer). False if that link is down. */
 bool ct_hal_net_send(int link, const char *json);
 
+/* Drop a link's connection (its computer failed a security check); reconnect later as usual. */
+void ct_hal_net_close(int link);
+
 /* Battery charge in percent, or -1 if unknown. */
 int ct_hal_battery_percent(void);
 
-/* Small persistent settings (NVS on the device): the device id and the token each
- * computer gave it when they paired. get returns false if the key is not set. */
+/* Small persistent settings (NVS on the device): the device id and the key it paired
+ * with each computer ("key:<hostId>", 64 hex digits). get returns false if the key is
+ * not set. Names can be longer than NVS's 15 characters: the firmware has to map them. */
 bool ct_hal_store_get(const char *key, char *buf, size_t size);
 void ct_hal_store_set(const char *key, const char *value); /* NULL value erases the key */
 
-/* 32 random bits, good enough for ids and pairing codes. */
+/* 32 random bits. Pairing and connection keys are made from these: they must come
+ * from a cryptographic source (esp_random with the radio on; crypto.getRandomValues). */
 uint32_t ct_hal_random(void);
 
 #ifdef __cplusplus

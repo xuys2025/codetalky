@@ -6,6 +6,16 @@ import type { Hub } from './hub.ts';
 import { fixStrings } from './glyphs.ts';
 import type { Pairing } from './pairing.ts';
 import { LIMITS, PROTO, parseFromDevice, type SessionSnapshot, type ToDevice } from './protocol.ts';
+import { Channel, commitOf, fromHex, linkKeys, newKeyPair, pairCode, pairKey, proofOf, random, same, sharedSecret, type KeyPair } from './secure.ts';
+
+/** This connection's challenge, and this computer's side of a pairing exchange. */
+interface Challenge {
+  nonce: Buffer;
+  keys: KeyPair;
+  r: Buffer;
+  /** r has been revealed: this exchange can't be used for another pairing attempt. */
+  spent: boolean;
+}
 
 export interface LinkOptions {
   /** This computer's name on the device, e.g. "台式机". */
@@ -43,9 +53,12 @@ export class DeviceLink {
   /** Set once the device has said hello; nothing is sent before that. */
   device: string | null = null;
   private deviceId: string | null = null;
-  /** Synced: the device is trusted (this machine) or showed a valid token, or just paired. */
+  /** Synced: the device is trusted (this machine) or proved it holds the key, or just paired. */
   private authed = false;
   private cancelPair: (() => void) | null = null;
+  private challenge: Challenge | null = null;
+  /** Network devices: every frame after auth is encrypted. */
+  private channel: Channel | null = null;
 
   private readonly hub: Hub;
   private readonly clock: Clock;
@@ -65,37 +78,37 @@ export class DeviceLink {
   }
 
   /** Handle one text frame. Returns false if the device should be disconnected. */
-  receive(text: string): boolean {
+  receive(frame: string): boolean {
     if (this.closed) return false;
+    let text = frame;
+    if (this.channel) {
+      // Once encrypted, anything that isn't the next frame from the device ends the connection.
+      const plain = this.channel.open(frame);
+      if (plain === null) return false;
+      text = plain;
+    } else if (frame.startsWith('E')) {
+      return false;
+    }
     const msg = parseFromDevice(text);
     if (msg === null) return this.device !== null; // ignore junk from a known device, drop strangers
     if (msg.t === 'hello') {
       if (msg.proto !== PROTO) return false;
+      if (this.authed) return true; // already through
       this.device = msg.device;
       this.deviceId = msg.deviceId;
       if (!this.options.pairing) {
         this.sync(); // this machine, or in-process: trusted
       } else {
         if (this.deviceId === null) return false; // can't pair without an id
-        this.askAuth(false);
+        this.askAuth(false); // also how a device asks for a new pairing code
       }
       return true;
     }
     if (this.device === null) return false;
     if (msg.t === 'auth' || msg.t === 'pair') {
-      if (this.authed) return true;
-      const pairing = this.options.pairing!;
-      if (msg.t === 'auth') {
-        if (pairing.check(this.deviceId!, msg.token)) this.sync();
-        else this.askAuth(true);
-      } else {
-        this.cancelPair?.();
-        this.cancelPair = pairing.request(this.deviceId!, this.device, msg.code, (token) => {
-          this.cancelPair = null;
-          this.send({ t: 'paired', token });
-          this.sync();
-        });
-      }
+      if (this.authed || !this.options.pairing || !this.challenge) return true;
+      if (msg.t === 'auth') this.checkProof(msg.nonce, msg.proof);
+      else this.startPairing(msg.pub, msg.r);
       return true;
     }
     if (!this.authed) return true; // actions only count once it has proven who it is
@@ -115,8 +128,60 @@ export class DeviceLink {
     this.cancelFlush = null;
   }
 
+  /** A fresh challenge, and a fresh pairing exchange in case the device has no key. */
   private askAuth(bad: boolean): void {
-    this.send({ t: 'auth', host: this.fix(this.options.hostName), hostId: this.options.hostId, ...(bad ? { bad } : {}) });
+    this.cancelPair?.();
+    this.cancelPair = null;
+    const c: Challenge = { nonce: random(), keys: newKeyPair(), r: random(), spent: false };
+    this.challenge = c;
+    this.send({
+      t: 'auth',
+      host: this.fix(this.options.hostName),
+      hostId: this.options.hostId,
+      nonce: c.nonce.toString('hex'),
+      pub: c.keys.pub.toString('hex'),
+      commit: commitOf(c.r).toString('hex'),
+      ...(bad ? { bad } : {}),
+    });
+  }
+
+  private checkProof(nonceHex: string, proofHex: string): void {
+    const c = this.challenge!;
+    const key = this.options.pairing!.keyOf(this.deviceId!);
+    const deviceNonce = fromHex(nonceHex, 16);
+    const proof = fromHex(proofHex, 32);
+    if (!key || !deviceNonce || !proof || !same(proof, proofOf(key, this.deviceId!, this.options.hostId, c.nonce, deviceNonce))) {
+      this.askAuth(true);
+      return;
+    }
+    this.secure(key, deviceNonce);
+    this.sync();
+  }
+
+  private startPairing(pubHex: string, rHex: string): void {
+    const c = this.challenge!;
+    const devicePub = fromHex(pubHex, 32);
+    const deviceR = fromHex(rHex, 16);
+    const shared = devicePub ? sharedSecret(c.keys.secret, devicePub) : null;
+    // One pairing attempt per exchange: the device asks for a new one with hello.
+    if (c.spent || !devicePub || !deviceR || !shared) return;
+    c.spent = true;
+    const code = pairCode(devicePub, c.keys.pub, deviceR, c.r);
+    const key = pairKey(shared, devicePub, c.keys.pub, deviceR, c.r);
+    this.send({ t: 'pairing', r: c.r.toString('hex') });
+    this.cancelPair = this.options.pairing!.request(this.deviceId!, this.device!, code, key, () => {
+      this.cancelPair = null;
+      this.secure(key, deviceR);
+      this.send({ t: 'paired' });
+      this.sync();
+    });
+  }
+
+  /** From here on every frame is encrypted with this connection's keys. */
+  private secure(key: Buffer, deviceNonce: Buffer): void {
+    const keys = linkKeys(key, this.challenge!.nonce, deviceNonce);
+    this.channel = new Channel(keys.toDevice, keys.toBridge);
+    this.challenge = null;
   }
 
   private sync(): void {
@@ -162,6 +227,8 @@ export class DeviceLink {
   }
 
   private send(msg: ToDevice): void {
-    if (!this.closed) this.sendText(JSON.stringify(msg));
+    if (this.closed) return;
+    const text = JSON.stringify(msg);
+    this.sendText(this.channel ? this.channel.seal(text) : text);
   }
 }

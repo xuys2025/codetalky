@@ -274,6 +274,11 @@ function onNetSend(link, text) {
   return true;
 }
 
+// The device gave up on a connection (a frame failed its check): drop it; onclose reconnects.
+function onNetClose(link) {
+  links[link]?.socket?.close();
+}
+
 function connect(index) {
   const link = links[index];
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -406,7 +411,7 @@ function storeSet(key, value) {
 }
 
 async function start() {
-  sim = await createCodeTalkySim({ onFlush, onVibrate, onNetSend, storeGet, storeSet });
+  sim = await createCodeTalkySim({ onFlush, onVibrate, onNetSend, onNetClose, storeGet, storeSet });
   W = sim._sim_width();
   H = sim._sim_height();
   canvas.width = W;

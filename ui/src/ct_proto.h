@@ -33,7 +33,7 @@ typedef enum {
     CT_EV_ACK,       /* answer to one of our actions */
     CT_EV_BAD_PROTO, /* the bridge speaks another protocol version */
     CT_EV_PAIRING,   /* this computer wants pairing: show ct_proto_pair_code() */
-    CT_EV_PAIRED,    /* the user approved it on the computer; the token is stored */
+    CT_EV_PAIRED,    /* the user approved it on the computer; the key is stored */
 } ct_event_type_t;
 
 typedef struct {
@@ -50,9 +50,10 @@ bool ct_proto_link_up(int link);
 /* Handle one text frame from the bridge on a link. */
 ct_event_t ct_proto_receive(int link, const char *json, size_t len);
 
-/* Pairing. A computer on the network asks the device to prove who it is; without a
- * token from earlier the device asks to pair and shows a six-digit code, which the
- * user approves on that computer with `codetalky pair <code>`. */
+/* Pairing. A computer on the network asks the device to prove it holds the key they
+ * paired with; without one the device asks to pair and shows a six-digit code that
+ * both sides compute (ct_secure.h), which the user types on that computer with
+ * `codetalky pair <code>`. After that the link is encrypted. */
 bool ct_proto_pairing(int link);          /* waiting for the user to approve */
 const char *ct_proto_pair_code(int link); /* "482159" */
 const char *ct_proto_pair_host(int link); /* that computer's name */

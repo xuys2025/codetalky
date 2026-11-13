@@ -103,6 +103,11 @@ const sim = await createSim({
     bridge.toBridge.push(text);
     return true;
   },
+  // The device only drops a connection when a frame fails its check: never in a good run.
+  onNetClose: (link) => {
+    console.error(`the device dropped its connection to ${bridges[link]?.name}: a frame failed its check`);
+    process.exitCode = 3;
+  },
 });
 
 function toUi(link, text) {
@@ -174,10 +179,16 @@ for (let i = 0; i < actions.length; i += 2) {
   } else if (flag === '--ms') {
     run(Number(value));
   } else if (flag === '--approve') {
-    // The user runs `codetalky pair <code>` on the computer.
+    // The user reads the code off the device and runs `codetalky pair <code>` on the computer.
+    // It only matches if the device and the computer worked out the same code.
     for (const b of bridges) {
-      const code = b.pairing?.pending()[0]?.code;
-      if (code) b.pairing.approve(code);
+      if (!b.pairing) continue;
+      const code = sim.UTF8ToString(sim._sim_pair_code(b.index));
+      if (!code) continue;
+      if (!b.pairing.approve(code)) {
+        console.error(`${b.name}: no pairing request with the device's code ${code}`);
+        process.exitCode = 3;
+      }
     }
     run(1000);
     i--; // takes no value
