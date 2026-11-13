@@ -33,3 +33,6 @@ snap 13-offline --offline
 snap 14-two-computers --hosts 2
 snap 15-two-approve --hosts 2 --tap $ROW2
 snap 16-one-offline --hosts 2 --unlink 1
+# Pairing with a computer the device hasn't met (on the network, or with --require-pairing).
+snap 17-pair --pair
+snap 18-paired --pair --approve

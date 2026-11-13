@@ -1,5 +1,6 @@
 #include "ct_proto.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "cJSON.h"
@@ -27,9 +28,80 @@
 
 static struct {
     bool up;
-    bool greeted; /* its bridge said hello on this connection */
+    bool greeted;     /* its bridge said hello on this connection */
+    bool pairing;     /* asked to pair, waiting for the user */
+    char host_id[80]; /* from the bridge's auth request */
+    char host[CT_HOST_MAX];
+    char code[8];
 } s_links[CT_MAX_LINKS];
 static uint32_t s_seq = 1;
+
+/* ---------- identity and pairing ---------- */
+
+#define STORE_DEVICE_ID "device-id"
+
+/* "tok:<hostId>": where the token a computer gave us is kept. */
+static void token_key(char *buf, size_t size, const char *host_id) {
+    snprintf(buf, size, "tok:%s", host_id);
+}
+
+/* This device's id: made once, kept in storage. */
+static const char *device_id(void) {
+    static char id[24];
+    if (id[0] == '\0' && !ct_hal_store_get(STORE_DEVICE_ID, id, sizeof(id))) {
+        snprintf(id, sizeof(id), "%08lx%08lx", (unsigned long)ct_hal_random(), (unsigned long)ct_hal_random());
+        ct_hal_store_set(STORE_DEVICE_ID, id);
+    }
+    return id;
+}
+
+static bool send_json(int link, cJSON *msg);
+static const cJSON *field(const cJSON *obj, const char *key);
+static const char *raw_string(const cJSON *obj, const char *key);
+
+static void ask_to_pair(int link) {
+    snprintf(s_links[link].code, sizeof(s_links[link].code), "%06lu", (unsigned long)(ct_hal_random() % 1000000u));
+    s_links[link].pairing = true;
+    cJSON *msg = cJSON_CreateObject();
+    if (msg != NULL) {
+        cJSON_AddStringToObject(msg, "t", "pair");
+        cJSON_AddStringToObject(msg, "code", s_links[link].code);
+        send_json(link, msg);
+    }
+}
+
+/* The bridge wants proof: our token for it if we have one (and it wasn't just refused), else pair. */
+static ct_event_type_t on_auth(int link, const cJSON *msg) {
+    const char *host_id = raw_string(msg, "hostId");
+    const char *host = raw_string(msg, "host");
+    snprintf(s_links[link].host_id, sizeof(s_links[link].host_id), "%s", host_id != NULL ? host_id : "");
+    snprintf(s_links[link].host, sizeof(s_links[link].host), "%s", host != NULL ? host : "电脑");
+    char key[96], token[160];
+    token_key(key, sizeof(key), s_links[link].host_id);
+    if (cJSON_IsTrue(field(msg, "bad"))) {
+        ct_hal_store_set(key, NULL); /* unpaired on that computer */
+    } else if (ct_hal_store_get(key, token, sizeof(token))) {
+        cJSON *reply = cJSON_CreateObject();
+        if (reply != NULL) {
+            cJSON_AddStringToObject(reply, "t", "auth");
+            cJSON_AddStringToObject(reply, "token", token);
+            send_json(link, reply);
+        }
+        return CT_EV_NONE;
+    }
+    ask_to_pair(link);
+    return CT_EV_PAIRING;
+}
+
+static void on_paired(int link, const cJSON *msg) {
+    const char *token = raw_string(msg, "token");
+    if (token != NULL && s_links[link].host_id[0] != '\0') {
+        char key[96];
+        token_key(key, sizeof(key), s_links[link].host_id);
+        ct_hal_store_set(key, token);
+    }
+    s_links[link].pairing = false;
+}
 
 /* ---------- reading JSON ---------- */
 
@@ -374,6 +446,11 @@ ct_event_t ct_proto_receive(int link, const char *json, size_t len) {
             s_links[link].greeted = true;
             ev.type = CT_EV_HELLO;
         }
+    } else if (strcmp(t, "auth") == 0) {
+        ev.type = on_auth(link, msg);
+    } else if (strcmp(t, "paired") == 0) {
+        on_paired(link, msg);
+        ev.type = CT_EV_PAIRED;
     } else if (!s_links[link].greeted) {
         /* Nothing counts before the bridge's hello. */
     } else if (strcmp(t, "session") == 0) {
@@ -420,14 +497,34 @@ void ct_proto_link(int link, bool up) {
     }
     s_links[link].up = up;
     s_links[link].greeted = false;
+    s_links[link].pairing = false;
     if (up) {
         cJSON *hello = cJSON_CreateObject();
         if (hello != NULL) {
             cJSON_AddStringToObject(hello, "t", "hello");
             cJSON_AddNumberToObject(hello, "proto", CT_PROTO_VERSION);
             cJSON_AddStringToObject(hello, "device", CT_DEVICE_NAME);
+            cJSON_AddStringToObject(hello, "deviceId", device_id());
             send_json(link, hello);
         }
+    }
+}
+
+bool ct_proto_pairing(int link) {
+    return valid_link(link) && s_links[link].up && s_links[link].pairing;
+}
+
+const char *ct_proto_pair_code(int link) {
+    return valid_link(link) ? s_links[link].code : "";
+}
+
+const char *ct_proto_pair_host(int link) {
+    return valid_link(link) ? s_links[link].host : "";
+}
+
+void ct_proto_pair_again(int link) {
+    if (ct_proto_pairing(link)) {
+        ask_to_pair(link);
     }
 }
 

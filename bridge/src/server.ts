@@ -10,6 +10,7 @@ import { WebSocketServer } from 'ws';
 import type { Clock } from './clock.ts';
 import type { Hub } from './hub.ts';
 import { DeviceLink, type LinkOptions } from './link.ts';
+import type { Pairing } from './pairing.ts';
 import { parseFromRun, type Runs, type ToRun } from './runs.ts';
 
 /** Handles a POST from an agent hook; headers carry the managed-run token. */
@@ -30,7 +31,11 @@ export interface ServerOptions extends LinkOptions {
   post?: Record<string, PostHandler>;
   /** Managed runs, whose launchers connect to /run. */
   runs?: Runs;
-  /** Let devices connect from other machines. There is no pairing yet, so off by default. */
+  /** Devices from other machines must pair (or show their token) first. Without it they are refused. */
+  pairing?: Pairing;
+  /** Make devices on this machine pair too (to try the pairing screens in the simulator). */
+  requirePairing?: boolean;
+  /** Let devices from other machines in without pairing. Testing only. */
   allowRemoteDevices?: boolean;
   log: (line: string) => void;
 }
@@ -200,16 +205,21 @@ export function startServer(hub: Hub, clock: Clock, options: ServerOptions): Pro
       });
       return;
     }
-    const remoteRefused = !isLoopback(req) && !options.allowRemoteDevices;
+    const remote = !isLoopback(req);
+    const mustPair = (remote && !options.allowRemoteDevices) || options.requirePairing === true;
+    const remoteRefused = mustPair && !options.pairing;
     if (path !== '/device' || !originAllowed(req) || remoteRefused) {
-      if (remoteRefused) options.log(`refused a device from ${req.socket.remoteAddress ?? '?'}: no pairing yet (see --insecure-lan)`);
+      if (remoteRefused) options.log(`refused a device from ${req.socket.remoteAddress ?? '?'}: pairing is not set up`);
       socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       socket.destroy();
       return;
     }
     sockets.handleUpgrade(req, socket, head, (ws) => {
       const peer = req.socket.remoteAddress ?? '?';
-      const link = new DeviceLink(hub, clock, (text) => ws.send(text), options);
+      const link = new DeviceLink(hub, clock, (text) => ws.send(text), {
+        ...options,
+        pairing: mustPair ? options.pairing : undefined,
+      });
       options.log(`device connected from ${peer}`);
       ws.on('message', (data, isBinary) => {
         if (isBinary) return; // audio frames: phase 3

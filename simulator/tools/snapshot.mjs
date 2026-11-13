@@ -14,6 +14,8 @@
 //   --offline    don't connect to the bridge (must come first)
 //   --hosts 2    two computers, 台式机 and 笔记本, three demo sessions each
 //   --unlink N   computer N (0 or 1) drops off the network
+//   --pair       the computers make the device pair first (must come first)
+//   --approve    approve the device's pairing request on the computer
 //   --long-report  make the api-server report too long for one screen
 //   --verbose    print the frames sent by the device
 //
@@ -26,7 +28,12 @@ import { ManualClock } from '../../bridge/src/clock.ts';
 import { FakeAgent } from '../../bridge/src/fake/engine.ts';
 import { DEMO_T0, demoScripts } from '../../bridge/src/fake/scenario.ts';
 import { Hub } from '../../bridge/src/hub.ts';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { Glyphs } from '../../bridge/src/glyphs.ts';
+import { Pairing } from '../../bridge/src/pairing.ts';
 import { DEFAULT_QUICK, DeviceLink } from '../../bridge/src/link.ts';
 
 const require = createRequire(import.meta.url);
@@ -42,7 +49,7 @@ const verbose = args.includes('--verbose');
 const hostsAt = args.indexOf('--hosts');
 const twoHosts = hostsAt >= 0 && args[hostsAt + 1] === '2';
 const actions = args.filter(
-  (a, i) => a !== '--offline' && a !== '--verbose' && a !== '--long-report' && !(hostsAt >= 0 && (i === hostsAt || i === hostsAt + 1)),
+  (a, i) => a !== '--offline' && a !== '--verbose' && a !== '--long-report' && a !== '--pair' && !(hostsAt >= 0 && (i === hostsAt || i === hostsAt + 1)),
 );
 
 // ---- bridges, in process: one per computer ----
@@ -55,6 +62,16 @@ const COMPUTERS = twoHosts
     ]
   : [{ name: '台式机', sessions: null }];
 const longReport = args.includes('--long-report');
+const pair = args.includes('--pair');
+const store = new Map();
+// Repeatable "random" numbers (mulberry32), so pairing codes are the same every run.
+let seed = 20261114;
+const random = () => {
+  seed = (seed + 0x6d2b79f5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return (t ^ (t >>> 14)) >>> 0;
+};
 const bridges = COMPUTERS.map((computer, index) => {
   const hub = new Hub(clock);
   for (const script of demoScripts()) {
@@ -65,7 +82,9 @@ const bridges = COMPUTERS.map((computer, index) => {
     }
     if (!computer.sessions || computer.sessions.includes(script.initial(0).id)) new FakeAgent(hub, clock, script);
   }
-  return { ...computer, index, hub, link: null, toDevice: [], toBridge: [] };
+  // Each computer keeps its own paired devices.
+  const pairing = pair ? new Pairing(join(mkdtempSync(join(tmpdir(), 'ct-')), 'devices.json'), clock, () => {}) : undefined;
+  return { ...computer, index, hub, pairing, link: null, toDevice: [], toBridge: [] };
 });
 
 // ---- device ----
@@ -73,6 +92,9 @@ const flushes = [];
 const sim = await createSim({
   onFlush: (x1, y1, x2, y2, last, mode) => flushes.push({ x1, y1, x2, y2, last, mode }),
   onVibrate: (ms) => console.log(`vibrate ${ms} ms`),
+  storeGet: (key) => store.get(key) ?? null,
+  storeSet: (key, value) => (value === null ? store.delete(key) : store.set(key, value)),
+  random,
   // Called from inside the UI; queue it and deliver between ticks so nothing re-enters LVGL.
   onNetSend: (link, text) => {
     const bridge = bridges[link];
@@ -126,6 +148,7 @@ if (!offline) {
       hostId: `demo-${b.index}`,
       quick: DEFAULT_QUICK,
       fixText: (text) => glyphs.fix(text),
+      pairing: b.pairing,
       tzMinutes: 480,
       flushMs: 150,
     });
@@ -150,6 +173,31 @@ for (let i = 0; i < actions.length; i += 2) {
     run(300);
   } else if (flag === '--ms') {
     run(Number(value));
+  } else if (flag === '--approve') {
+    // The user runs `codetalky pair <code>` on the computer.
+    for (const b of bridges) {
+      const code = b.pairing?.pending()[0]?.code;
+      if (code) b.pairing.approve(code);
+    }
+    run(1000);
+    i--; // takes no value
+  } else if (flag === '--relink') {
+    // That computer's connection drops and comes back (a paired device shows its token).
+    const b = bridges[Number(value)];
+    b.link?.close();
+    sim._sim_net_link(b.index, 0);
+    run(500);
+    b.link = new DeviceLink(b.hub, clock, (text) => b.toDevice.push(text), {
+      hostName: b.name,
+      hostId: `demo-${b.index}`,
+      quick: DEFAULT_QUICK,
+      fixText: (text) => glyphs.fix(text),
+      pairing: b.pairing,
+      tzMinutes: 480,
+      flushMs: 150,
+    });
+    sim._sim_net_link(b.index, 1);
+    run(1000);
   } else if (flag === '--unlink') {
     // That computer drops off the network.
     const b = bridges[Number(value)];

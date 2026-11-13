@@ -21,11 +21,14 @@ import { FakeAgent } from './fake/engine.ts';
 import { demoScripts } from './fake/scenario.ts';
 import { Hub } from './hub.ts';
 import { Glyphs } from './glyphs.ts';
-import { bridgeId, defaultName } from './identity.ts';
+import { join } from 'node:path';
+
+import { bridgeId, CONFIG_DIR, defaultName } from './identity.ts';
+import { Pairing } from './pairing.ts';
 import { DEFAULT_QUICK } from './link.ts';
 import { runManaged } from './run.ts';
 import { Runs } from './runs.ts';
-import { startServer } from './server.ts';
+import { startServer, type PostReply } from './server.ts';
 
 const USAGE = `usage: node src/main.ts [--name N] [--fake] [--fake-only IDS] [--speed N] [--hold S]
                         [--host H] [--port P] [--no-sim] [--insecure-lan]
@@ -41,8 +44,14 @@ const USAGE = `usage: node src/main.ts [--name N] [--fake] [--fake-only IDS] [--
   --host H        address to listen on (default 127.0.0.1)
   --port P        port (default 8137)
   --no-sim        do not serve the browser simulator
-  --insecure-lan  let devices connect from other machines. There is no pairing yet:
-                  anyone on the network could approve on your behalf. Testing only.
+  --insecure-lan  let devices from other machines in without pairing. Testing only:
+                  anyone on the network could approve on your behalf.
+  --require-pairing  make devices on this machine pair too (to try pairing in the simulator)
+
+  pair            list devices waiting to pair with the running bridge
+  pair CODE       pair the device whose screen shows CODE
+  devices         list paired devices
+  unpair ID       forget a paired device (by id or name)
 
   hooks           print hook settings that send Claude Code's events to the bridge
   --codex         the same for Codex (merge into ~/.codex/hooks.json, then trust them with /hooks)
@@ -67,6 +76,7 @@ interface ServeOptions {
   port: number;
   sim: boolean;
   insecureLan: boolean;
+  requirePairing: boolean;
 }
 
 /** `codetalky claude ...`, `codetalky codex ...`, `codetalky run -- CMD ...`: everything after goes to the agent. */
@@ -105,6 +115,7 @@ function main(): void {
         port: { type: 'string', default: '8137' },
         'no-sim': { type: 'boolean', default: false },
         'insecure-lan': { type: 'boolean', default: false },
+        'require-pairing': { type: 'boolean', default: false },
         codex: { type: 'boolean', default: false },
         merge: { type: 'string' },
         remove: { type: 'string' },
@@ -140,6 +151,10 @@ function main(): void {
     }
     return;
   }
+  if (command === 'pair' || command === 'devices' || command === 'unpair') {
+    pairingCommand(port, command, rest);
+    return;
+  }
   if (command !== undefined) fail(`unknown command ${command}`);
   const only = args['fake-only'];
   serve({
@@ -151,6 +166,7 @@ function main(): void {
     port,
     sim: !args['no-sim'],
     insecureLan: args['insecure-lan'],
+    requirePairing: args['require-pairing'],
   });
 }
 
@@ -158,6 +174,7 @@ function serve(o: ServeOptions): void {
   const log = (line: string) => console.log(`[${new Date().toTimeString().slice(0, 8)}] ${line}`);
   const hub = new Hub(realClock);
   const runs = new Runs();
+  const pairing = new Pairing(join(CONFIG_DIR, 'devices.json'), realClock, log);
   const claude = new ClaudeSource(hub, realClock, { holdSeconds: o.hold, log, runs });
   const codex = new ClaudeSource(hub, realClock, { holdSeconds: o.hold, log, runs, agent: 'codex', tools: codexTools });
   const demoClock = o.speed === 1 ? realClock : fastClock(o.speed);
@@ -173,9 +190,12 @@ function serve(o: ServeOptions): void {
     post: {
       '/hooks/claude': (body, headers) => claude.handle(body, headers),
       '/hooks/codex': (body, headers) => codex.handle(body, headers),
+      '/pairing': (body) => Promise.resolve(pairingControl(pairing, body)),
     },
     runs,
     allowRemoteDevices: o.insecureLan,
+    pairing,
+    requirePairing: o.requirePairing,
     hostName: o.name,
     hostId: bridgeId(o.port),
     quick: DEFAULT_QUICK,
@@ -192,7 +212,7 @@ function serve(o: ServeOptions): void {
       if (o.insecureLan) {
         console.log('warning: --insecure-lan: no pairing yet, anyone who can reach this port can approve on your behalf');
       } else if (o.host !== '127.0.0.1' && o.host !== 'localhost') {
-        console.log('note: devices on other machines are refused until pairing exists (or pass --insecure-lan)');
+        console.log('devices on the network must pair first: the device shows a code, then run "codetalky pair <code>" here');
       }
       const stop = () => {
         for (const agent of agents) agent.stop();
@@ -208,6 +228,63 @@ function serve(o: ServeOptions): void {
       process.exit(1);
     },
   );
+}
+
+/** What `codetalky pair/devices/unpair` ask the running bridge to do. */
+function pairingControl(pairing: Pairing, body: unknown): PostReply {
+  const b = (body ?? {}) as { action?: unknown; code?: unknown; id?: unknown };
+  switch (b.action) {
+    case 'pending':
+      return { status: 200, body: { pending: pairing.pending() } };
+    case 'approve': {
+      const done = typeof b.code === 'string' ? pairing.approve(b.code) : null;
+      return done ? { status: 200, body: done } : { status: 404, body: { error: 'no device is showing that code' } };
+    }
+    case 'devices':
+      return { status: 200, body: { devices: pairing.list().map(({ id, name, pairedAt }) => ({ id, name, pairedAt })) } };
+    case 'unpair':
+      return typeof b.id === 'string' && pairing.remove(b.id) ? { status: 200, body: {} } : { status: 404, body: { error: 'no such device' } };
+    default:
+      return { status: 400, body: { error: 'unknown action' } };
+  }
+}
+
+function pairingCommand(port: number, command: string, rest: string[]): void {
+  const body =
+    command === 'pair'
+      ? rest[0]
+        ? { action: 'approve', code: rest[0] }
+        : { action: 'pending' }
+      : command === 'devices'
+        ? { action: 'devices' }
+        : { action: 'unpair', id: rest[0] ?? '' };
+  fetch(`http://127.0.0.1:${port}/pairing`, { method: 'POST', body: JSON.stringify(body) })
+    .then(async (res) => {
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok) {
+        console.error(String(data.error ?? res.status));
+        process.exit(1);
+      }
+      if (command === 'pair' && rest[0]) {
+        console.log(`paired "${String(data.name)}"`);
+      } else if (command === 'pair') {
+        const pending = data.pending as { name: string; code: string }[];
+        console.log(pending.length ? pending.map((p) => `${p.code}  ${p.name}`).join('\n') : 'no device is waiting to pair');
+      } else if (command === 'devices') {
+        const devices = data.devices as { id: string; name: string; pairedAt: number }[];
+        console.log(
+          devices.length
+            ? devices.map((d) => `${d.id}  ${d.name}  ${new Date(d.pairedAt * 1000).toLocaleString()}`).join('\n')
+            : 'no paired devices',
+        );
+      } else {
+        console.log('unpaired');
+      }
+    })
+    .catch(() => {
+      console.error(`the bridge is not running on port ${port}`);
+      process.exit(1);
+    });
 }
 
 main();

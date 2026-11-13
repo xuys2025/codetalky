@@ -4,6 +4,7 @@
 import type { Clock } from './clock.ts';
 import type { Hub } from './hub.ts';
 import { fixStrings } from './glyphs.ts';
+import type { Pairing } from './pairing.ts';
 import { LIMITS, PROTO, parseFromDevice, type SessionSnapshot, type ToDevice } from './protocol.ts';
 
 export interface LinkOptions {
@@ -19,6 +20,8 @@ export interface LinkOptions {
   flushMs: number;
   /** Swap characters the device can't draw (see glyphs.ts). Default: send as is. */
   fixText?: (text: string) => string;
+  /** Devices must show a token or pair first. Unset for connections from this machine. */
+  pairing?: Pairing;
 }
 
 export const DEFAULT_QUICK = ['继续下一步', '跑一下测试', '提交这些改动', '先停一下，等我回电脑', '撤销刚才的修改'];
@@ -39,6 +42,10 @@ export function forDevice(s: SessionSnapshot): SessionSnapshot {
 export class DeviceLink {
   /** Set once the device has said hello; nothing is sent before that. */
   device: string | null = null;
+  private deviceId: string | null = null;
+  /** Synced: the device is trusted (this machine) or showed a valid token, or just paired. */
+  private authed = false;
+  private cancelPair: (() => void) | null = null;
 
   private readonly hub: Hub;
   private readonly clock: Clock;
@@ -65,10 +72,33 @@ export class DeviceLink {
     if (msg.t === 'hello') {
       if (msg.proto !== PROTO) return false;
       this.device = msg.device;
-      this.sync();
+      this.deviceId = msg.deviceId;
+      if (!this.options.pairing) {
+        this.sync(); // this machine, or in-process: trusted
+      } else {
+        if (this.deviceId === null) return false; // can't pair without an id
+        this.askAuth(false);
+      }
       return true;
     }
     if (this.device === null) return false;
+    if (msg.t === 'auth' || msg.t === 'pair') {
+      if (this.authed) return true;
+      const pairing = this.options.pairing!;
+      if (msg.t === 'auth') {
+        if (pairing.check(this.deviceId!, msg.token)) this.sync();
+        else this.askAuth(true);
+      } else {
+        this.cancelPair?.();
+        this.cancelPair = pairing.request(this.deviceId!, this.device, msg.code, (token) => {
+          this.cancelPair = null;
+          this.send({ t: 'paired', token });
+          this.sync();
+        });
+      }
+      return true;
+    }
+    if (!this.authed) return true; // actions only count once it has proven who it is
     const err = this.hub.act(msg);
     // State first, then the ack: when the ack arrives the device already shows the truth.
     this.flush();
@@ -78,13 +108,19 @@ export class DeviceLink {
 
   close(): void {
     this.closed = true;
+    this.cancelPair?.();
     this.unsubscribe?.();
     this.detach?.();
     this.cancelFlush?.();
     this.cancelFlush = null;
   }
 
+  private askAuth(bad: boolean): void {
+    this.send({ t: 'auth', host: this.fix(this.options.hostName), hostId: this.options.hostId, ...(bad ? { bad } : {}) });
+  }
+
   private sync(): void {
+    this.authed = true;
     this.dirty.clear();
     this.send({
       t: 'hello',

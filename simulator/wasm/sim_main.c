@@ -50,6 +50,38 @@ bool ct_hal_net_send(int link, const char *json) {
     return js_net_send(link, json) != 0;
 }
 
+/* Settings live wherever the page puts them (localStorage in the browser). */
+EM_JS(int, js_store_get, (const char *key, char *buf, int size), {
+    const value = Module.storeGet ? Module.storeGet(UTF8ToString(key)) : null;
+    if (value === null || value === undefined) return 0;
+    stringToUTF8(String(value), buf, size);
+    return 1;
+});
+
+EM_JS(void, js_store_set, (const char *key, const char *value), {
+    if (Module.storeSet) Module.storeSet(UTF8ToString(key), value ? UTF8ToString(value) : null);
+});
+
+/* Module.random lets the headless snapshots be repeatable. */
+EM_JS(uint32_t, js_random, (void), {
+    if (Module.random) return Module.random() >>> 0;
+    const a = new Uint32Array(1);
+    crypto.getRandomValues(a);
+    return a[0];
+});
+
+bool ct_hal_store_get(const char *key, char *buf, size_t size) {
+    return js_store_get(key, buf, (int)size) != 0;
+}
+
+void ct_hal_store_set(const char *key, const char *value) {
+    js_store_set(key, value);
+}
+
+uint32_t ct_hal_random(void) {
+    return js_random();
+}
+
 int ct_hal_battery_percent(void) {
     return 82;
 }

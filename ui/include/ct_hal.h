@@ -9,6 +9,7 @@
 #define CT_HAL_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -33,6 +34,14 @@ bool ct_hal_net_send(int link, const char *json);
 
 /* Battery charge in percent, or -1 if unknown. */
 int ct_hal_battery_percent(void);
+
+/* Small persistent settings (NVS on the device): the device id and the token each
+ * computer gave it when they paired. get returns false if the key is not set. */
+bool ct_hal_store_get(const char *key, char *buf, size_t size);
+void ct_hal_store_set(const char *key, const char *value); /* NULL value erases the key */
+
+/* 32 random bits, good enough for ids and pairing codes. */
+uint32_t ct_hal_random(void);
 
 #ifdef __cplusplus
 }

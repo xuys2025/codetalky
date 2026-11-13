@@ -96,7 +96,11 @@ export type ToDevice =
   | { t: 'session'; s: SessionSnapshot }
   | { t: 'gone'; id: string }
   | { t: 'ready' }
-  | { t: 'ack'; seq: number; ok: boolean; err?: AckError };
+  | { t: 'ack'; seq: number; ok: boolean; err?: AckError }
+  /** Before anything else on a network connection: show your token, or ask to pair. bad: the token was refused. */
+  | { t: 'auth'; host: string; hostId: string; bad?: boolean }
+  /** The user approved pairing on the computer: keep this token for hostId. */
+  | { t: 'paired'; token: string };
 
 export type DeviceAction =
   | { t: 'approve'; seq: number; id: string; req: string; allow: boolean }
@@ -104,7 +108,13 @@ export type DeviceAction =
   | { t: 'reply'; seq: number; id: string; text: string }
   | { t: 'seen'; seq: number; id: string };
 
-export type FromDevice = { t: 'hello'; proto: number; device: string } | DeviceAction;
+export type FromDevice =
+  | { t: 'hello'; proto: number; device: string; deviceId: string | null }
+  /** The token this computer gave it when they paired. */
+  | { t: 'auth'; token: string }
+  /** Ask to pair; the device shows the code, the user types it on the computer. */
+  | { t: 'pair'; code: string }
+  | DeviceAction;
 
 /** Limits the bridge applies before sending, so the device can size its buffers. */
 export const LIMITS = {
@@ -130,7 +140,14 @@ export function parseFromDevice(text: string): FromDevice | null {
   if (!isObject(msg)) return null;
   if (msg.t === 'hello') {
     if (typeof msg.proto !== 'number' || typeof msg.device !== 'string') return null;
-    return { t: 'hello', proto: msg.proto, device: msg.device.slice(0, 32) };
+    const deviceId = typeof msg.deviceId === 'string' && /^[0-9a-f]{16,32}$/.test(msg.deviceId) ? msg.deviceId : null;
+    return { t: 'hello', proto: msg.proto, device: msg.device.slice(0, 32), deviceId };
+  }
+  if (msg.t === 'auth') {
+    return typeof msg.token === 'string' && msg.token.length <= 128 ? { t: 'auth', token: msg.token } : null;
+  }
+  if (msg.t === 'pair') {
+    return typeof msg.code === 'string' && /^\d{6}$/.test(msg.code) ? { t: 'pair', code: msg.code } : null;
   }
   if (!isSeq(msg.seq) || !isId(msg.id)) return null;
   const base = { seq: msg.seq, id: msg.id };

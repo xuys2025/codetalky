@@ -387,8 +387,26 @@ function bindInput() {
   });
 }
 
+// The device's settings (its id, pairing tokens) kept in this browser.
+function storeGet(key) {
+  try {
+    return localStorage.getItem(`codetalky:${key}`);
+  } catch {
+    return null;
+  }
+}
+
+function storeSet(key, value) {
+  try {
+    if (value === null) localStorage.removeItem(`codetalky:${key}`);
+    else localStorage.setItem(`codetalky:${key}`, value);
+  } catch {
+    // private window: forgotten on reload, which is fine for a simulator
+  }
+}
+
 async function start() {
-  sim = await createCodeTalkySim({ onFlush, onVibrate, onNetSend });
+  sim = await createCodeTalkySim({ onFlush, onVibrate, onNetSend, storeGet, storeSet });
   W = sim._sim_width();
   H = sim._sim_height();
   canvas.width = W;

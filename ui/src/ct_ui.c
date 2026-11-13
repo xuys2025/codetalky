@@ -43,7 +43,15 @@ typedef enum {
     SCR_VOICE,
     SCR_ENTRY, /* one activity entry in full */
     SCR_DIFF,  /* the whole change a permission request would make */
+    SCR_PAIR,  /* a computer wants this device to pair */
 } screen_id_t;
+
+/* Pairing: the screen shows the code of one computer that asked. A code is good for
+ * five minutes on the computer; a fresh one is requested a little before that. */
+#define PAIR_REFRESH_MS (280 * 1000)
+static int s_pair_link = -1;
+static uint32_t s_pair_since;
+static bool s_pair_later[CT_MAX_LINKS]; /* "以后再说": don't pop the screen up again */
 
 static screen_id_t s_screen = SCR_NONE;
 static screen_id_t s_reply_from = SCR_LIST;
@@ -107,6 +115,7 @@ static void show_reply(void);
 static void show_voice(void);
 static void show_entry(void);
 static void show_diff(void);
+static void show_pair(void);
 
 /* The activity entry on the entry screen. Entries have no id and the log shifts as
  * new ones arrive, so it is found again by its time, verb and target. */
@@ -148,6 +157,14 @@ static bool any_synced(void) {
         if (s_links[i].up && s_links[i].synced) return true;
     }
     return false;
+}
+
+/* A computer waiting for this device to pair, or -1. */
+static int pairing_link(void) {
+    for (int i = 0; i < CT_MAX_LINKS; i++) {
+        if (ct_proto_pairing(i)) return i;
+    }
+    return -1;
 }
 
 static bool any_bad_proto(void) {
@@ -194,8 +211,9 @@ static draw_key_t key_now(void) {
     draw_key_t k = {0};
     k.minute = ct_model_now() / 60;
     for (int i = 0; i < CT_MAX_LINKS; i++) {
-        k.links |= (s_links[i].up ? 1u : 0u) << (2 * i);
-        k.links |= (s_links[i].synced ? 2u : 0u) << (2 * i);
+        k.links |= (s_links[i].up ? 1u : 0u) << (3 * i);
+        k.links |= (s_links[i].synced ? 2u : 0u) << (3 * i);
+        k.links |= (ct_proto_pairing(i) ? 4u : 0u) << (3 * i);
     }
     if (s_screen == SCR_LIST) {
         k.rev = ct_model_rev();
@@ -587,6 +605,11 @@ static void show_list(void) {
             empty_state(content, "版本对不上", "电脑上的 codetalky 和设备不是同一个版本，更新到同一版本后再连。");
         } else if (links_up() == 0) {
             empty_state(content, "没连上电脑", "确认电脑上的 codetalky 在运行，并且和设备在同一个 Wi-Fi 下。正在自动重连。");
+        } else if (!any_synced() && pairing_link() >= 0) {
+            const int link = pairing_link();
+            char hint[160];
+            snprintf(hint, sizeof(hint), "在“%s”上运行 codetalky pair %s", ct_proto_pair_host(link), ct_proto_pair_code(link));
+            empty_state(content, "还没和电脑配对", hint);
         } else if (!any_synced()) {
             empty_state(content, "正在同步", "电脑正在发来会话列表。");
         } else if (links_seen() > 1) {
@@ -1555,6 +1578,78 @@ static void show_voice(void) {
     present(screen, SCR_VOICE);
 }
 
+/* ---------- pairing ---------- */
+
+static void on_pair_later(lv_event_t *e) {
+    (void)e;
+    if (s_pair_link >= 0) {
+        s_pair_later[s_pair_link] = true;
+    }
+    s_pair_link = -1;
+    show_list();
+}
+
+static void show_pair(void) {
+    const int link = s_pair_link;
+    if (link < 0 || !ct_proto_pairing(link)) {
+        s_pair_link = -1;
+        show_list();
+        return;
+    }
+    const char *code = ct_proto_pair_code(link);
+    lv_obj_t *screen = ct_screen_new();
+    status_bar(screen);
+    ct_nav(screen, "配对", NULL);
+
+    lv_obj_t *content = ct_content(screen, CT_PAD);
+    lv_obj_set_style_pad_row(content, 12, 0);
+    lv_obj_set_style_pad_top(content, 20, 0);
+    char buf[160];
+    snprintf(buf, sizeof(buf), "这台设备还没和“%s”配对过。配好以后才能看那台电脑上的 agent。", ct_proto_pair_host(link));
+    ct_paragraph(content, F20, buf);
+
+    ct_section(content, "配对码");
+    lv_obj_t *digits = ct_row(content, 80, 0, 8);
+    lv_obj_set_flex_align(digits, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    for (int i = 0; code[i] != '\0' && i < 6; i++) {
+        lv_obj_t *box = ct_box(digits);
+        lv_obj_set_size(box, 58, 76);
+        ct_border(box, 3, LV_BORDER_SIDE_FULL);
+        if (i == 3) {
+            lv_obj_set_style_margin_left(box, 12, 0);
+        }
+        const char digit[2] = {code[i], '\0'};
+        lv_obj_center(ct_label(box, MB24, digit));
+    }
+
+    snprintf(buf, sizeof(buf), "在“%s”上运行", ct_proto_pair_host(link));
+    ct_section(content, buf);
+    lv_obj_t *cmd = ct_col(content, 12, 0);
+    lv_obj_set_style_pad_ver(cmd, 12, 0);
+    ct_border(cmd, 2, LV_BORDER_SIDE_FULL);
+    snprintf(buf, sizeof(buf), "codetalky pair %s", code);
+    ct_paragraph(cmd, MB20, buf);
+    ct_paragraph(content, F18, "这样只有能操作那台电脑的人才能配对。配对码 5 分钟内有效，过期会自动换一个。");
+
+    lv_obj_t *bar = ct_bottom_bar(screen, 76);
+    ct_spacer(bar);
+    ct_button(bar, "以后再说", B20, 140, 56, false, on_pair_later, NULL);
+    present(screen, SCR_PAIR);
+}
+
+/* A computer asked to pair: show its code, unless the user already said later. */
+static void start_pairing(int link) {
+    if (s_pair_later[link] || s_pending.seq != 0) {
+        return;
+    }
+    if (s_pair_link < 0 || s_pair_link == link) {
+        s_pair_link = link;
+        s_pair_since = lv_tick_get();
+        s_next_refresh = CT_REFRESH_FAST;
+        show_pair();
+    }
+}
+
 /* ---------- following the data ---------- */
 
 static uint32_t hash_pair(const char *a, const char *b) {
@@ -1643,6 +1738,7 @@ static void follow_data(void) {
         }
         break;
     case SCR_ENTRY: show_entry(); break;
+    case SCR_PAIR: show_pair(); break;
     case SCR_REPLY: show_reply(); break;
     case SCR_VOICE: show_voice(); break;
     default: show_detail(); break;
@@ -1662,6 +1758,14 @@ static void forget_lost_links(void) {
 static void on_poll(lv_timer_t *timer) {
     (void)timer;
     forget_lost_links();
+    /* The computer forgets a pairing code after five minutes: ask with a new one first. */
+    if (s_screen == SCR_PAIR && s_pair_link >= 0 && lv_tick_elaps(s_pair_since) >= PAIR_REFRESH_MS) {
+        ct_proto_pair_again(s_pair_link);
+        s_pair_since = lv_tick_get();
+        s_next_refresh = CT_REFRESH_FAST;
+        show_pair();
+        return;
+    }
     announce_new_requests();
     if (s_pending.seq != 0) {
         if (lv_tick_elaps(s_pending.sent_at) >= ACK_TIMEOUT_MS) {
@@ -1717,6 +1821,16 @@ void ct_ui_on_message(int link, const char *json, size_t len) {
         s_resynced = true;
         break;
     case CT_EV_BAD_PROTO: s_links[link].bad_proto = true; break;
+    case CT_EV_PAIRING: start_pairing(link); break;
+    case CT_EV_PAIRED:
+        s_pair_later[link] = false;
+        if (s_screen == SCR_PAIR && s_pair_link == link) {
+            s_pair_link = -1;
+            s_banner = "配对好了";
+            s_next_refresh = CT_REFRESH_FAST;
+            show_list();
+        }
+        break;
     case CT_EV_ACK:
         if (s_pending.seq != 0 && s_pending.link == link && ev.seq == s_pending.seq) {
             finish_action(ev.ack);
