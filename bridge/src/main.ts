@@ -11,6 +11,7 @@
 //   node src/main.ts hooks --remove F   take them out again
 
 import { homedir } from 'node:os';
+import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
@@ -49,8 +50,9 @@ const USAGE = `usage: node src/main.ts [--name N] [--fake] [--fake-only IDS] [--
                   anyone on the network could approve on your behalf.
   --require-pairing  make devices on this machine pair too (to try pairing in the simulator)
 
-  pair            list devices waiting to pair with the running bridge
-  pair CODE       pair the device whose screen shows CODE
+  pair            start pairing: devices on the network get a code for 5 minutes;
+                  type the code the device shows when asked
+  pair CODE       pair the device whose screen shows CODE (pairing must be open)
   devices         list paired devices
   unpair ID       forget a paired device (by id or name)
 
@@ -239,6 +241,8 @@ function serve(o: ServeOptions): void {
 function pairingControl(pairing: Pairing, body: unknown): PostReply {
   const b = (body ?? {}) as { action?: unknown; code?: unknown; id?: unknown };
   switch (b.action) {
+    case 'open':
+      return { status: 200, body: pairing.open() };
     case 'pending':
       return { status: 200, body: { pending: pairing.pending() } };
     case 'approve': {
@@ -254,15 +258,48 @@ function pairingControl(pairing: Pairing, body: unknown): PostReply {
   }
 }
 
+/** `codetalky pair`: open a pairing window on the running bridge, then ask for the code the device shows. */
+async function pairInteractively(port: number): Promise<void> {
+  const call = async (body: unknown) => {
+    const res = await fetch(`http://127.0.0.1:${port}/pairing`, { method: 'POST', body: JSON.stringify(body) });
+    return { ok: res.ok, data: (await res.json()) as Record<string, unknown> };
+  };
+  let opened;
+  try {
+    opened = await call({ action: 'open' });
+  } catch {
+    console.error(`the bridge is not running on port ${port}`);
+    process.exit(1);
+  }
+  const waiting = Number(opened.data.waiting ?? 0);
+  console.log(`Pairing is open for 5 minutes${waiting ? ` (${waiting} device(s) waiting)` : ''}.`);
+  console.log('Look at the device: it shows a 6-digit code. Type that code here (never one from anywhere else).');
+  const lines = createInterface({ input: process.stdin, output: process.stdout });
+  for (let tries = 0; tries < 3; tries++) {
+    const code = (await lines.question('code: ')).replace(/\s+/g, '');
+    if (!/^\d{6}$/.test(code)) {
+      console.log('six digits, please');
+      continue;
+    }
+    const done = await call({ action: 'approve', code });
+    if (done.ok) {
+      console.log(`paired "${String(done.data.name)}". Now confirm on the device too.`);
+      lines.close();
+      return;
+    }
+    console.log('no device is showing that code. Check the screen again (if it never matches, someone may be in between).');
+  }
+  lines.close();
+  process.exitCode = 1;
+}
+
 function pairingCommand(port: number, command: string, rest: string[]): void {
+  if (command === 'pair' && !rest[0]) {
+    void pairInteractively(port);
+    return;
+  }
   const body =
-    command === 'pair'
-      ? rest[0]
-        ? { action: 'approve', code: rest[0] }
-        : { action: 'pending' }
-      : command === 'devices'
-        ? { action: 'devices' }
-        : { action: 'unpair', id: rest[0] ?? '' };
+    command === 'pair' ? { action: 'approve', code: rest[0] } : command === 'devices' ? { action: 'devices' } : { action: 'unpair', id: rest[0] ?? '' };
   fetch(`http://127.0.0.1:${port}/pairing`, { method: 'POST', body: JSON.stringify(body) })
     .then(async (res) => {
       const data = (await res.json()) as Record<string, unknown>;
@@ -270,11 +307,8 @@ function pairingCommand(port: number, command: string, rest: string[]): void {
         console.error(String(data.error ?? res.status));
         process.exit(1);
       }
-      if (command === 'pair' && rest[0]) {
-        console.log(`paired "${String(data.name)}"`);
-      } else if (command === 'pair') {
-        const pending = data.pending as { name: string; code: string }[];
-        console.log(pending.length ? pending.map((p) => `${p.code}  ${p.name}`).join('\n') : 'no device is waiting to pair');
+      if (command === 'pair') {
+        console.log(`paired "${String(data.name)}". Now confirm on the device too.`);
       } else if (command === 'devices') {
         const devices = data.devices as { id: string; name: string; pairedAt: number }[];
         console.log(

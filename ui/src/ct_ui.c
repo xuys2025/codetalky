@@ -650,7 +650,7 @@ static void show_list(void) {
         } else if (!any_synced() && pairing_link() >= 0) {
             const int link = pairing_link();
             char hint[160];
-            snprintf(hint, sizeof(hint), "在“%s”上运行 codetalky pair %s", ct_proto_pair_host(link), ct_proto_pair_code(link));
+            snprintf(hint, sizeof(hint), "在“%s”上运行 codetalky pair", ct_proto_pair_host(link));
             empty_state(content, "还没和电脑配对", hint);
         } else if (!any_synced()) {
             empty_state(content, "正在同步", "电脑正在发来会话列表。");
@@ -1788,6 +1788,39 @@ static void on_pair_later(lv_event_t *e) {
     show_list();
 }
 
+static void on_pair_confirm(lv_event_t *e) {
+    const bool yes = lv_event_get_user_data(e) != NULL;
+    const int link = s_pair_link;
+    s_pair_link = -1;
+    if (link >= 0) {
+        s_pair_later[link] = false;
+        ct_proto_pair_confirm(link, yes);
+    }
+    s_banner = yes ? "配对好了" : "没有配对，连接已断开";
+    s_next_refresh = CT_REFRESH_FAST;
+    show_list();
+}
+
+static void on_pair_reset(lv_event_t *e) {
+    (void)e;
+    if (s_pair_link >= 0) {
+        ct_proto_pair_reset(s_pair_link);
+    }
+    s_next_refresh = CT_REFRESH_FAST;
+    show_pair();
+}
+
+/* "codetalky pair" in a box, as typed on the computer. */
+static void command_box(lv_obj_t *content, const char *host) {
+    char buf[96];
+    snprintf(buf, sizeof(buf), "在“%s”上运行", host);
+    ct_section(content, buf);
+    lv_obj_t *cmd = ct_col(content, 12, 0);
+    lv_obj_set_style_pad_ver(cmd, 12, 0);
+    ct_border(cmd, 2, LV_BORDER_SIDE_FULL);
+    ct_paragraph(cmd, MB20, "codetalky pair");
+}
+
 static void show_pair(void) {
     const int link = s_pair_link;
     if (link < 0 || !ct_proto_pairing(link)) {
@@ -1795,6 +1828,8 @@ static void show_pair(void) {
         show_list();
         return;
     }
+    const ct_pair_stage_t stage = ct_proto_pair_stage(link);
+    const char *host = ct_proto_pair_host(link);
     const char *code = ct_proto_pair_code(link);
     lv_obj_t *screen = ct_screen_new();
     status_bar(screen);
@@ -1803,34 +1838,57 @@ static void show_pair(void) {
     lv_obj_t *content = ct_content(screen, CT_PAD);
     lv_obj_set_style_pad_row(content, 12, 0);
     lv_obj_set_style_pad_top(content, 20, 0);
-    char buf[160];
-    snprintf(buf, sizeof(buf), "这台设备还没和“%s”配对过。配好以后才能看那台电脑上的 agent。", ct_proto_pair_host(link));
-    ct_paragraph(content, F20, buf);
+    char buf[200];
+    lv_obj_t *bar = ct_bottom_bar(screen, 76);
+    lv_obj_set_style_pad_column(bar, 12, 0);
 
-    ct_section(content, "配对码");
-    lv_obj_t *digits = ct_row(content, 80, 0, 8);
-    lv_obj_set_flex_align(digits, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    for (int i = 0; code[i] != '\0' && i < 6; i++) {
-        lv_obj_t *box = ct_box(digits);
-        lv_obj_set_size(box, 58, 76);
-        ct_border(box, 3, LV_BORDER_SIDE_FULL);
-        if (i == 3) {
-            lv_obj_set_style_margin_left(box, 12, 0);
-        }
-        const char digit[2] = {code[i], '\0'};
-        lv_obj_center(ct_label(box, MB24, digit));
+    if (stage == CT_PAIR_REFUSED) {
+        snprintf(buf, sizeof(buf), "“%s”不认这台设备了", host);
+        short_paragraph(content, B24, buf, 2);
+        ct_paragraph(content, F20,
+                     "可能是在那台电脑上取消了配对（codetalky unpair），也可能是有人在冒充那台电脑。"
+                     "确定是你自己取消的，再点“重新配对”；不确定就先别动，原来的配对还留着。");
+        ct_spacer(bar);
+        ct_button(bar, "以后再说", B20, 120, 56, false, on_pair_later, NULL);
+        ct_button(bar, "重新配对", B20, 120, 56, true, on_pair_reset, NULL);
+        present(screen, SCR_PAIR);
+        return;
+    }
+    if (stage == CT_PAIR_CONFIRM) {
+        snprintf(buf, sizeof(buf), "“%s”上显示配对成功了吗？", host);
+        short_paragraph(content, B24, buf, 2);
+        ct_paragraph(content, F20,
+                     "电脑上输入配对码后，会显示 paired。看到了再点“配好了”。"
+                     "如果电脑说没有这个码，点“不对”：可能有人在中间冒充。");
+        ct_spacer(bar);
+        ct_button(bar, "不对", B20, 100, 56, false, on_pair_confirm, NULL);
+        ct_button(bar, "配好了", B20, 120, 56, true, on_pair_confirm, (void *)1);
+        present(screen, SCR_PAIR);
+        return;
     }
 
-    snprintf(buf, sizeof(buf), "在“%s”上运行", ct_proto_pair_host(link));
-    ct_section(content, buf);
-    lv_obj_t *cmd = ct_col(content, 12, 0);
-    lv_obj_set_style_pad_ver(cmd, 12, 0);
-    ct_border(cmd, 2, LV_BORDER_SIDE_FULL);
-    snprintf(buf, sizeof(buf), "codetalky pair %s", code);
-    ct_paragraph(cmd, MB20, buf);
-    ct_paragraph(content, F18, "这样只有能操作那台电脑的人才能配对。配对码 5 分钟内有效，过期会自动换一个。");
-
-    lv_obj_t *bar = ct_bottom_bar(screen, 76);
+    snprintf(buf, sizeof(buf), "这台设备还没和“%s”配对过。配好以后才能看那台电脑上的 agent。", host);
+    ct_paragraph(content, F20, buf);
+    if (stage == CT_PAIR_CODE) {
+        ct_section(content, "配对码");
+        lv_obj_t *digits = ct_row(content, 80, 0, 8);
+        lv_obj_set_flex_align(digits, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        for (int i = 0; code[i] != '\0' && i < 6; i++) {
+            lv_obj_t *box = ct_box(digits);
+            lv_obj_set_size(box, 58, 76);
+            ct_border(box, 3, LV_BORDER_SIDE_FULL);
+            if (i == 3) {
+                lv_obj_set_style_margin_left(box, 12, 0);
+            }
+            const char digit[2] = {code[i], '\0'};
+            lv_obj_center(ct_label(box, MB24, digit));
+        }
+        command_box(content, host);
+        ct_paragraph(content, F18, "它会让你输入上面的码。只输入这块屏幕上的码，别的地方给的都不要输。");
+    } else {
+        command_box(content, host);
+        ct_paragraph(content, F18, "运行后这里会出现 6 位配对码，再把它输入那台电脑。只有能操作那台电脑的人才能配对。");
+    }
     ct_spacer(bar);
     ct_button(bar, "以后再说", B20, 140, 56, false, on_pair_later, NULL);
     present(screen, SCR_PAIR);
@@ -2029,15 +2087,6 @@ void ct_ui_on_message(int link, const char *json, size_t len) {
         break;
     case CT_EV_BAD_PROTO: s_links[link].bad_proto = true; break;
     case CT_EV_PAIRING: start_pairing(link); break;
-    case CT_EV_PAIRED:
-        s_pair_later[link] = false;
-        if (s_screen == SCR_PAIR && s_pair_link == link) {
-            s_pair_link = -1;
-            s_banner = "配对好了";
-            s_next_refresh = CT_REFRESH_FAST;
-            show_list();
-        }
-        break;
     case CT_EV_ACK:
         if (s_pending.seq != 0 && s_pending.link == link && ev.seq == s_pending.seq) {
             finish_action(ev.ack);

@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { ManualClock } from '../src/clock.ts';
 import { Hub } from '../src/hub.ts';
-import { DeviceLink } from '../src/link.ts';
-import { MAX_PENDING, Pairing } from '../src/pairing.ts';
+import { DeviceLink, HANDSHAKE_MS } from '../src/link.ts';
+import { MAX_PENDING, Pairing, WINDOW_MS, WINDOW_REVEALS } from '../src/pairing.ts';
 import { parseFromDevice, type SessionSnapshot } from '../src/protocol.ts';
 import {
   Channel,
@@ -39,7 +39,9 @@ test('a device pairs only when the user types its code, and its key is kept', ()
   const { pairing, file, clock } = setup();
   let granted = 0;
   pairing.request(DEVICE, '墨水屏', '482159', KEY, () => granted++);
-  assert.deepEqual(pairing.pending().map((p) => p.code), ['482159']);
+  // The computer never lists codes: the user has to read the one on the device.
+  assert.deepEqual(pairing.pending().map((p) => [p.name, p.shown]), [['墨水屏', true]]);
+  assert.equal(JSON.stringify(pairing.pending()).includes('482159'), false);
   assert.equal(pairing.keyOf(DEVICE), null);
   assert.equal(pairing.approve('000000'), null);
   assert.deepEqual(pairing.approve('482159'), { deviceId: DEVICE, name: '墨水屏' });
@@ -64,9 +66,8 @@ test('pairing requests expire after five minutes, and old token pairings are dro
   assert.equal(new Pairing(file, clock, () => {}).keyOf(DEVICE), null);
 });
 
-test('only a few requests wait at once, and a code two of them share pairs neither', () => {
+test('only a few requests wait at once, a code two of them share pairs neither, and nobody clears another’s', () => {
   const { pairing } = setup();
-  // Someone parking many requests would likely hold whatever code the user types.
   for (let i = 0; i < MAX_PENDING; i++) assert.ok(pairing.request(`d${i}`.padEnd(16, '0'), 'x', `00000${i}`, KEY, () => {}));
   assert.equal(pairing.request('e'.repeat(16), 'x', '123456', KEY, () => {}), null);
   assert.equal(pairing.pending().length, MAX_PENDING);
@@ -74,18 +75,11 @@ test('only a few requests wait at once, and a code two of them share pairs neith
   const { pairing: other } = setup();
   let granted = 0;
   other.request('a'.repeat(16), '真设备', '482159', KEY, () => granted++);
-  other.request('b'.repeat(16), '冒充的', '482159', KEY, () => granted++);
+  // Device ids are public: a second request with the same id doesn't push the first one out.
+  other.request('a'.repeat(16), '冒充的', '482159', KEY, () => granted++);
+  assert.equal(other.pending().length, 2);
   assert.equal(other.approve('482159'), null);
   assert.equal(granted, 0);
-});
-
-test('a device asking to pair while the computer is full is turned away before it sees a code', () => {
-  const { clock, pairing } = setup();
-  for (let i = 0; i < MAX_PENDING; i++) pairing.request(`d${i}`.padEnd(16, '0'), 'x', `00000${i}`, KEY, () => {});
-  const d = new FakeDevice(new Hub(clock), clock, pairing);
-  assert.equal(d.hello(), true);
-  assert.deepEqual(d.kinds(), ['auth'], 'no reveal, so no code');
-  assert.equal(d.code, '');
 });
 
 test('the device messages for auth and pairing are checked', () => {
@@ -96,6 +90,7 @@ test('the device messages for auth and pairing are checked', () => {
   assert.equal(parseFromDevice(`{"t":"pair","code":"482159"}`), null, 'the old way is gone');
   assert.deepEqual(parseFromDevice(`{"t":"auth","nonce":"${r}","proof":"${pub}"}`), { t: 'auth', nonce: r, proof: pub });
   assert.equal(parseFromDevice('{"t":"auth","token":"abc"}'), null);
+  assert.deepEqual(parseFromDevice('{"t":"paired"}'), { t: 'paired' });
   assert.deepEqual(parseFromDevice(`{"t":"hello","proto":1,"device":"d","deviceId":"${DEVICE}"}`), {
     t: 'hello',
     proto: 1,
@@ -128,12 +123,15 @@ type Msg = Record<string, unknown> & { t: string };
 /**
  * The device's side, as ui/src/ct_proto.c does it: answer auth with a proof if it
  * holds a key for this computer, else pair; show the code once the computer reveals
- * its value; then talk encrypted.
+ * its value; keep the key only once the computer said paired and the user confirmed
+ * on the device too; then talk encrypted.
  */
 class FakeDevice {
   key: Buffer | null = null;
   code = '';
   got: Msg[] = [];
+  /** Whether the user taps "配好了" when the computer says it paired. */
+  confirm = true;
   private nonce: Buffer | null = null;
   private auth: Msg | null = null;
   private mine: { keys: KeyPair; r: Buffer } | null = null;
@@ -142,14 +140,25 @@ class FakeDevice {
   private confirmed = false;
   private pendingKey: Buffer | null = null;
   readonly link: DeviceLink;
+  readonly id: string;
+  dropped = false;
 
-  constructor(hub: Hub, clock: ManualClock, pairing: Pairing, key: Buffer | null = null) {
+  constructor(hub: Hub, clock: ManualClock, pairing: Pairing, key: Buffer | null = null, id = DEVICE) {
     this.key = key;
-    this.link = new DeviceLink(hub, clock, (frame) => this.receive(frame), { hostName: '台式机', hostId: HOST, quick: [], tzMinutes: 0, flushMs: 10, pairing });
+    this.id = id;
+    this.link = new DeviceLink(hub, clock, (frame) => this.receive(frame), {
+      hostName: '台式机',
+      hostId: HOST,
+      quick: [],
+      tzMinutes: 0,
+      flushMs: 10,
+      pairing,
+      drop: () => (this.dropped = true),
+    });
   }
 
   hello(): boolean {
-    return this.send({ t: 'hello', proto: 1, device: '墨水屏', deviceId: DEVICE });
+    return this.send({ t: 'hello', proto: 1, device: '墨水屏', deviceId: this.id });
   }
 
   send(msg: Msg): boolean {
@@ -168,15 +177,16 @@ class FakeDevice {
       assert.ok(plain !== null, 'an encrypted frame the device can open');
       text = plain;
       this.confirmed = true;
-      if (this.pendingKey) {
-        this.key = this.pendingKey; // the computer has the key too: the user approved
-        this.pendingKey = null;
-      }
     }
     const msg = JSON.parse(text) as Msg;
     this.got.push(msg);
     if (msg.t === 'auth') this.onAuth(msg);
     if (msg.t === 'pairing') this.onPairing(msg);
+    if (msg.t === 'paired' && this.pendingKey && this.confirm) {
+      this.key = this.pendingKey;
+      this.pendingKey = null;
+      this.send({ t: 'paired' });
+    }
   }
 
   private onAuth(msg: Msg): void {
@@ -184,16 +194,17 @@ class FakeDevice {
     this.channel = null;
     this.confirmed = false;
     const bridgeNonce = Buffer.from(msg.nonce as string, 'hex');
-    if (msg.bad) this.key = null;
-    if (this.key) {
+    if (this.key && !msg.bad) {
       this.nonce = random();
-      const proof = proofOf(this.key, DEVICE, HOST, bridgeNonce, this.nonce);
+      const proof = proofOf(this.key, this.id, HOST, bridgeNonce, this.nonce);
       const k = linkKeys(this.key, bridgeNonce, this.nonce);
       // Ready for the encrypted answer before the plain proof goes (here the answer comes back at once).
       this.channel = new Channel(k.toBridge, k.toDevice);
       this.link.receive(JSON.stringify({ t: 'auth', nonce: this.nonce.toString('hex'), proof: proof.toString('hex') }));
       return;
     }
+    // A refusal doesn't erase its key by itself (the device asks the user); here we just stop.
+    if (this.key && msg.bad) return;
     this.mine = { keys: newKeyPair(), r: random() };
     this.send({ t: 'pair', pub: this.mine.keys.pub.toString('hex'), r: this.mine.r.toString('hex') });
   }
@@ -212,7 +223,7 @@ class FakeDevice {
   }
 }
 
-test('a network device pairs by code, then proves itself on every connection, all encrypted', () => {
+test('a network device pairs by code with both sides confirming, then proves itself on every connection, all encrypted', () => {
   const { clock, pairing } = setup();
   const hub = new Hub(clock);
   const decided: boolean[] = [];
@@ -224,7 +235,10 @@ test('a network device pairs by code, then proves itself on every connection, al
 
   const d = new FakeDevice(hub, clock, pairing);
   assert.equal(d.hello(), true);
-  // auth (challenge), the device asks to pair, the computer reveals its value: the device shows a code.
+  // No code until the user starts pairing on the computer.
+  assert.deepEqual(d.kinds(), ['auth']);
+  assert.deepEqual(pairing.pending().map((p) => p.shown), [false]);
+  assert.deepEqual(pairing.open(), { waiting: 1 });
   assert.deepEqual(d.kinds(), ['auth', 'pairing']);
   assert.match(d.code, /^\d{6}$/);
   // Nothing it does counts before it is paired.
@@ -232,9 +246,9 @@ test('a network device pairs by code, then proves itself on every connection, al
   assert.deepEqual(decided, []);
   assert.equal(hub.devices(), 0);
 
-  // The computer worked out the same code; the user types it there.
-  assert.deepEqual(pairing.pending().map((p) => [p.name, p.code]), [['墨水屏', d.code]]);
-  pairing.approve(d.code);
+  // The computer worked out the same code; the user types it there, then confirms on the device.
+  assert.deepEqual(pairing.approve(d.code), { deviceId: DEVICE, name: '墨水屏' });
+  assert.equal(pairing.isOpen(), false, 'pairing ends the window');
   assert.deepEqual(d.kinds(), ['auth', 'pairing', 'paired', 'hello', 'session', 'ready']);
   assert.ok(d.key, 'both sides hold the key now');
   assert.deepEqual(pairing.keyOf(DEVICE), d.key);
@@ -253,17 +267,86 @@ test('a network device pairs by code, then proves itself on every connection, al
   assert.deepEqual(again.kinds(), ['auth', 'hello', 'session', 'ready']);
   again.link.close();
 
-  // A wrong key is refused, and the device is asked to pair again.
+  // A wrong key is refused with a new challenge (the device decides what to do about it).
   const wrong = new FakeDevice(hub, clock, pairing, Buffer.alloc(32, 1));
   wrong.hello();
-  assert.deepEqual(wrong.kinds(), ['auth', 'auth', 'pairing']);
+  assert.deepEqual(wrong.kinds(), ['auth', 'auth']);
   assert.equal(wrong.got[1]!.bad, true);
+});
+
+test('the computer saying paired is not enough: nothing syncs until the user confirms on the device', () => {
+  const { clock, pairing } = setup();
+  const hub = new Hub(clock);
+  hub.put(session('s1'), { decide: () => {} });
+  pairing.open();
+  const d = new FakeDevice(hub, clock, pairing);
+  d.confirm = false;
+  d.hello();
+  pairing.approve(d.code);
+  assert.deepEqual(d.kinds(), ['auth', 'pairing', 'paired']);
+  assert.equal(d.key, null);
+  assert.equal(hub.devices(), 0);
+});
+
+test('codes are rationed: a few exchanges per window the user opens, however often anyone reconnects', () => {
+  const { clock, pairing } = setup();
+  const hub = new Hub(clock);
+  // Someone trying for a matching code: a new connection, a new device id, every time.
+  let reveals = 0;
+  const attempt = (i: number) => {
+    const a = new FakeDevice(hub, clock, pairing, null, i.toString(16).padStart(16, '0'));
+    a.hello();
+    reveals += a.kinds().filter((k) => k === 'pairing').length;
+    a.link.close();
+  };
+  for (let i = 0; i < 50; i++) attempt(i);
+  assert.equal(reveals, 0, 'no window, no codes');
+  pairing.open();
+  for (let i = 50; i < 100; i++) attempt(i);
+  assert.equal(reveals, WINDOW_REVEALS);
+  // Spent reveals don't come back by reconnecting, nor when the window runs out.
+  clock.advance(WINDOW_MS + 1);
+  pairing.open();
+  for (let i = 100; i < 150; i++) attempt(i);
+  assert.equal(reveals, 2 * WINDOW_REVEALS);
+});
+
+test('devices that ask while no window is open wait for one; too many waiting are turned away', () => {
+  const { clock, pairing } = setup();
+  const hub = new Hub(clock);
+  const waiting = Array.from({ length: MAX_PENDING }, (_, i) => new FakeDevice(hub, clock, pairing, null, `${i}`.padStart(16, 'a')));
+  for (const w of waiting) w.hello();
+  const late = new FakeDevice(hub, clock, pairing, null, 'f'.repeat(16));
+  late.hello();
+  assert.deepEqual(late.kinds(), ['auth'], 'its pair was refused');
+  // Closing a waiting connection takes it off the list.
+  waiting[0]!.link.close();
+  pairing.open();
+  assert.deepEqual(waiting.map((w) => w.kinds().includes('pairing')), [false, true, true]);
+});
+
+test('a network device that neither proves itself nor pairs in time is dropped', () => {
+  const { clock, pairing } = setup();
+  const d = new FakeDevice(new Hub(clock), clock, pairing);
+  d.hello();
+  clock.advance(HANDSHAKE_MS - 1);
+  assert.equal(d.dropped, false);
+  clock.advance(1);
+  assert.equal(d.dropped, true);
+  // One that got through is left alone.
+  pairing.open();
+  const ok = new FakeDevice(new Hub(clock), clock, pairing);
+  ok.hello();
+  pairing.approve(ok.code);
+  clock.advance(HANDSHAKE_MS);
+  assert.equal(ok.dropped, false);
 });
 
 test('frames that were changed, replayed or come from someone without the key end the connection', () => {
   const { clock, pairing } = setup();
   const hub = new Hub(clock);
   hub.put(session('s1'), { decide: () => {} });
+  pairing.open();
   const d = new FakeDevice(hub, clock, pairing);
   d.hello();
   pairing.approve(d.code);
@@ -308,7 +391,6 @@ test('someone in the middle who swaps the keys ends up with codes that do not ma
   const bridgeCode = pairCode(toBridge.keys.pub, bridge.keys.pub, toBridge.r, bridge.r);
   assert.notEqual(deviceCode, bridgeCode);
   // Without anyone in the middle, both sides agree, and so do their keys.
-  assert.equal(pairCode(device.keys.pub, bridge.keys.pub, device.r, bridge.r), pairCode(device.keys.pub, bridge.keys.pub, device.r, bridge.r));
   const a = sharedSecret(device.keys.secret, bridge.keys.pub)!;
   const b = sharedSecret(bridge.keys.secret, device.keys.pub)!;
   assert.deepEqual(a, b);
@@ -319,6 +401,7 @@ test('someone in the middle who swaps the keys ends up with codes that do not ma
 test('a pairing exchange is used once: asking again needs a new hello', () => {
   const { clock, pairing } = setup();
   const hub = new Hub(clock);
+  pairing.open();
   const d = new FakeDevice(hub, clock, pairing);
   d.hello();
   const first = d.code;
@@ -329,6 +412,6 @@ test('a pairing exchange is used once: asking again needs a new hello', () => {
   d.hello();
   assert.deepEqual(d.kinds(), ['auth', 'pairing', 'auth', 'pairing']);
   assert.equal(pairing.pending().length, 1);
-  assert.equal(pairing.pending()[0]!.code, d.code);
-  assert.equal(pairing.approve(first === d.code ? '-' : first), null);
+  if (first !== d.code) assert.equal(pairing.approve(first), null);
+  assert.ok(pairing.approve(d.code));
 });

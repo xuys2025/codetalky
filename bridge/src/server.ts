@@ -171,10 +171,28 @@ export interface RunningServer {
   close(): Promise<void>;
 }
 
+/** The path of a request, or null if it can't be read (a malformed request must not take the bridge down). */
+function pathOf(req: IncomingMessage): string | null {
+  try {
+    return new URL(req.url ?? '/', 'http://x').pathname;
+  } catch {
+    return null;
+  }
+}
+
+/** At most this many devices from the network may be connected and not yet proven or paired. */
+export const MAX_UNPROVEN = 8;
+
 export function startServer(hub: Hub, clock: Clock, options: ServerOptions): Promise<RunningServer> {
   const simRoot = options.simDir === null ? null : resolve(options.simDir);
+  const links = new Set<DeviceLink>();
   const http: Server = createServer((req, res) => {
-    const path = new URL(req.url ?? '/', 'http://x').pathname;
+    const path = pathOf(req);
+    if (path === null) {
+      res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8', connection: 'close' });
+      res.end('bad request');
+      return;
+    }
     const post = options.post?.[path];
     if (post && req.method === 'POST') {
       handlePost(post, req, res, options.log);
@@ -190,7 +208,12 @@ export function startServer(hub: Hub, clock: Clock, options: ServerOptions): Pro
 
   const sockets = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
   http.on('upgrade', (req, socket, head) => {
-    const path = new URL(req.url ?? '/', 'http://x').pathname;
+    const path = pathOf(req);
+    if (path === null) {
+      socket.write('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     // Launchers of managed runs: this machine only, never a web page.
     if (path === '/run' && options.runs) {
       const runs = options.runs;
@@ -228,12 +251,20 @@ export function startServer(hub: Hub, clock: Clock, options: ServerOptions): Pro
       socket.destroy();
       return;
     }
+    // Connections that haven't proven anything yet cost a key exchange each: keep them few.
+    if (mustPair && [...links].filter((l) => l.pending).length >= MAX_UNPROVEN) {
+      socket.write('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     sockets.handleUpgrade(req, socket, head, (ws) => {
       const peer = req.socket.remoteAddress ?? '?';
       const link = new DeviceLink(hub, clock, (text) => ws.send(text), {
         ...options,
         pairing: mustPair ? options.pairing : undefined,
+        drop: () => ws.close(4001, 'handshake timeout'),
       });
+      links.add(link);
       options.log(`device connected from ${peer}`);
       ws.on('message', (data, isBinary) => {
         if (isBinary) return; // audio frames: phase 3
@@ -246,6 +277,7 @@ export function startServer(hub: Hub, clock: Clock, options: ServerOptions): Pro
       });
       ws.on('close', () => {
         link.close();
+        links.delete(link);
         options.log(`device ${peer} disconnected`);
       });
       ws.on('error', () => ws.terminate());

@@ -14,8 +14,13 @@
 //   --offline    don't connect to the bridge (must come first)
 //   --hosts 2    two computers, 台式机 and 笔记本, three demo sessions each
 //   --unlink N   computer N (0 or 1) drops off the network
-//   --pair       the computers make the device pair first (must come first)
-//   --approve    approve the device's pairing request on the computer
+//   --pair       the computers make the device pair first (must come first); pairing is open
+//   --pair-wait  the same, but nobody has run codetalky pair yet (must come first)
+//   --open       the user runs codetalky pair on every computer
+//   --approve    the user types the code the device shows into codetalky pair (then tap
+//                "配好了" on the device to finish)
+//   --relink N   computer N drops and reconnects (a paired device proves itself)
+//   --unpair N   computer N forgets the device (it says so when the device next connects)
 //   --long-report  make the api-server report too long for one screen
 //   --verbose    print the frames sent by the device
 //
@@ -49,7 +54,7 @@ const verbose = args.includes('--verbose');
 const hostsAt = args.indexOf('--hosts');
 const twoHosts = hostsAt >= 0 && args[hostsAt + 1] === '2';
 const actions = args.filter(
-  (a, i) => a !== '--offline' && a !== '--verbose' && a !== '--long-report' && a !== '--pair' && !(hostsAt >= 0 && (i === hostsAt || i === hostsAt + 1)),
+  (a, i) => a !== '--offline' && a !== '--verbose' && a !== '--long-report' && a !== '--pair' && a !== '--pair-wait' && !(hostsAt >= 0 && (i === hostsAt || i === hostsAt + 1)),
 );
 
 // ---- bridges, in process: one per computer ----
@@ -62,7 +67,9 @@ const COMPUTERS = twoHosts
     ]
   : [{ name: '台式机', sessions: null }];
 const longReport = args.includes('--long-report');
-const pair = args.includes('--pair');
+// --pair-wait: pairing is required, but nobody has run codetalky pair yet (--open does).
+const pairWait = args.includes('--pair-wait');
+const pair = args.includes('--pair') || pairWait;
 const store = new Map();
 // Repeatable "random" numbers (mulberry32), so pairing codes are the same every run.
 let seed = 20261114;
@@ -86,6 +93,8 @@ const bridges = COMPUTERS.map((computer, index) => {
   }
   // Each computer keeps its own paired devices.
   const pairing = pair ? new Pairing(join(mkdtempSync(join(tmpdir(), 'ct-')), 'devices.json'), clock, () => {}) : undefined;
+  // The user has run `codetalky pair` on each computer, so the device gets its code right away.
+  if (!pairWait) pairing?.open();
   return { ...computer, index, hub, pairing, link: null, toDevice: [], toBridge: [] };
 });
 
@@ -213,6 +222,15 @@ for (let i = 0; i < actions.length; i += 2) {
     });
     sim._sim_net_link(b.index, 1);
     run(1000);
+  } else if (flag === '--open') {
+    // The user runs `codetalky pair` on every computer.
+    for (const b of bridges) b.pairing?.open();
+    run(1000);
+    i--; // takes no value
+  } else if (flag === '--unpair') {
+    // That computer forgets the device (codetalky unpair); it shows when the device next connects.
+    const b = bridges[Number(value)];
+    for (const d of b.pairing?.list() ?? []) b.pairing.remove(d.id);
   } else if (flag === '--unlink') {
     // That computer drops off the network.
     const b = bridges[Number(value)];

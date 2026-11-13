@@ -116,7 +116,7 @@ export type ToDevice =
   | { t: 'auth'; host: string; hostId: string; nonce: string; pub: string; commit: string; bad?: boolean }
   /** Pairing (plain): the value committed to in auth. The device can now show the code. */
   | { t: 'pairing'; r: string }
-  /** The user approved the code on the computer. The first encrypted frame. */
+  /** The user approved the code on the computer. The first encrypted frame; the device answers with its own paired once the user confirms there too. */
   | { t: 'paired' };
 
 /** An answer to a question: one option, several (multi), or the user's own words. */
@@ -135,6 +135,8 @@ export type FromDevice =
   | { t: 'auth'; nonce: string; proof: string }
   /** Ask to pair: its side of the exchange (hex). It shows the code once the computer reveals its value. */
   | { t: 'pair'; pub: string; r: string }
+  /** The user confirmed on the device too that the computer said it paired (sent encrypted). */
+  | { t: 'paired' }
   | DeviceAction;
 
 /** Limits the bridge applies before sending, so the device can size its buffers. */
@@ -171,6 +173,7 @@ export function parseFromDevice(text: string): FromDevice | null {
   if (msg.t === 'pair') {
     return hex(msg.pub, 32) && hex(msg.r, 16) ? { t: 'pair', pub: msg.pub, r: msg.r } : null;
   }
+  if (msg.t === 'paired') return { t: 'paired' };
   if (!isSeq(msg.seq) || !isId(msg.id)) return null;
   const base = { seq: msg.seq, id: msg.id };
   switch (msg.t) {

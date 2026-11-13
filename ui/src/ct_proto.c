@@ -58,7 +58,7 @@ typedef struct {
 static struct {
     bool up;
     bool greeted;     /* its bridge said hello on this connection */
-    bool pairing;     /* showing a code, waiting for the user */
+    ct_pair_stage_t pair; /* where pairing with this computer stands */
     char host_id[80]; /* from the bridge's auth request */
     char host[CT_HOST_MAX];
     char code[8];
@@ -99,12 +99,15 @@ static void add_hex(cJSON *msg, const char *name, const uint8_t *bytes, size_t n
     cJSON_AddStringToObject(msg, name, hex);
 }
 
-/* Our side of the pairing exchange the computer offered in its auth. */
+/* Our side of the pairing exchange the computer offered in its auth. The code comes
+ * once the user starts pairing there and the computer reveals its value. */
 static void ask_to_pair(int link) {
     sec_t *sec = &s_links[link].sec;
     ct_keypair(sec->secret, sec->pub);
     ct_random(sec->r, sizeof(sec->r));
     sec->asked = true;
+    s_links[link].pair = CT_PAIR_WAITING;
+    s_links[link].code[0] = '\0';
     cJSON *msg = cJSON_CreateObject();
     if (msg != NULL) {
         cJSON_AddStringToObject(msg, "t", "pair");
@@ -114,8 +117,9 @@ static void ask_to_pair(int link) {
     }
 }
 
-/* The computer wants proof (plain): prove we hold our key for it if we have one (and
- * it wasn't just refused), else pair. */
+/* The computer wants proof (plain, so anyone could have sent it): prove we hold our
+ * key for it if we have one, else pair. A refusal of our key never erases it here:
+ * the user decides (ct_proto_pair_reset). */
 static ct_event_type_t on_auth(int link, const cJSON *msg) {
     sec_t *sec = &s_links[link].sec;
     uint8_t nonce[CT_NONCE_BYTES], pub[CT_KEY_BYTES], commit[CT_KEY_BYTES];
@@ -135,9 +139,15 @@ static ct_event_type_t on_auth(int link, const cJSON *msg) {
     char name[96], hex[2 * CT_KEY_BYTES + 1];
     uint8_t key[CT_KEY_BYTES];
     key_name(name, sizeof(name), s_links[link].host_id);
-    if (cJSON_IsTrue(field(msg, "bad"))) {
-        ct_hal_store_set(name, NULL); /* that computer doesn't know us (any more) */
-    } else if (ct_hal_store_get(name, hex, sizeof(hex)) && ct_unhex(key, sizeof(key), hex)) {
+    const bool have_key = ct_hal_store_get(name, hex, sizeof(hex)) && ct_unhex(key, sizeof(key), hex);
+    ct_wipe(hex, sizeof(hex));
+    if (have_key && cJSON_IsTrue(field(msg, "bad"))) {
+        /* That computer doesn't accept our key: unpaired there, or someone posing as it. */
+        ct_wipe(key, sizeof(key));
+        s_links[link].pair = CT_PAIR_REFUSED;
+        return CT_EV_PAIRING;
+    }
+    if (have_key) {
         uint8_t mine[CT_NONCE_BYTES], proof[CT_KEY_BYTES];
         ct_random(mine, sizeof(mine));
         ct_proof(proof, key, device_id(), s_links[link].host_id, sec->nonce, mine);
@@ -151,10 +161,11 @@ static ct_event_type_t on_auth(int link, const cJSON *msg) {
             send_json(link, reply);
         }
         sec->keyed = true; /* its answer comes encrypted */
+        s_links[link].pair = CT_PAIR_NONE;
         return CT_EV_NONE;
     }
     ask_to_pair(link);
-    return CT_EV_NONE; /* the code comes with its reveal */
+    return CT_EV_PAIRING; /* waiting for the user to start pairing on the computer */
 }
 
 /* The computer revealed what it committed to: now both sides can work out the code. */
@@ -176,26 +187,21 @@ static ct_event_type_t on_pairing(int link, const cJSON *msg) {
     sec->keyed = true;
     ct_wipe(shared, sizeof(shared));
     ct_wipe(sec->secret, sizeof(sec->secret));
-    s_links[link].pairing = true;
+    s_links[link].pair = CT_PAIR_CODE;
     return CT_EV_PAIRING;
 }
 
-/* The first frame we could open: the computer holds the key. A new one is kept. */
+/* The first frame we could open: whoever sent it holds the key. For a new key that
+ * proves nothing about who they are (whoever we exchanged with has it), so the user
+ * confirms on the device that the computer said it paired before it is kept. */
 static ct_event_type_t on_confirmed(int link) {
     sec_t *sec = &s_links[link].sec;
     sec->confirmed = true;
     if (!sec->have_new_key) {
         return CT_EV_NONE;
     }
-    char name[96], hex[2 * CT_KEY_BYTES + 1];
-    key_name(name, sizeof(name), s_links[link].host_id);
-    ct_hex(hex, sec->new_key, CT_KEY_BYTES);
-    ct_hal_store_set(name, hex);
-    ct_wipe(hex, sizeof(hex));
-    ct_wipe(sec->new_key, sizeof(sec->new_key));
-    sec->have_new_key = false;
-    s_links[link].pairing = false;
-    return CT_EV_PAIRED;
+    s_links[link].pair = CT_PAIR_CONFIRM;
+    return CT_EV_PAIRING;
 }
 
 /* ---------- reading JSON ---------- */
@@ -557,7 +563,7 @@ static ct_event_t handle(int link, const char *json, size_t len, bool sealed) {
     } else if (strcmp(t, "pairing") == 0) {
         if (!sealed) ev.type = on_pairing(link, msg);
     } else if (strcmp(t, "paired") == 0) {
-        /* on_confirmed() already kept the key */
+        /* on_confirmed() has asked the user to confirm it on the device */
     } else if (strcmp(t, "hello") == 0) {
         if (int_of(msg, "proto", -1) != CT_PROTO_VERSION) {
             ev.type = CT_EV_BAD_PROTO;
@@ -660,19 +666,23 @@ void ct_proto_link(int link, bool up) {
     }
     s_links[link].up = up;
     s_links[link].greeted = false;
-    s_links[link].pairing = false;
+    s_links[link].pair = CT_PAIR_NONE;
     forget_secrets(link);
     if (up) {
         say_hello(link);
     }
 }
 
+ct_pair_stage_t ct_proto_pair_stage(int link) {
+    return valid_link(link) && s_links[link].up ? s_links[link].pair : CT_PAIR_NONE;
+}
+
 bool ct_proto_pairing(int link) {
-    return valid_link(link) && s_links[link].up && s_links[link].pairing;
+    return ct_proto_pair_stage(link) != CT_PAIR_NONE;
 }
 
 const char *ct_proto_pair_code(int link) {
-    return valid_link(link) ? s_links[link].code : "";
+    return ct_proto_pair_stage(link) == CT_PAIR_CODE ? s_links[link].code : "";
 }
 
 const char *ct_proto_pair_host(int link) {
@@ -682,10 +692,48 @@ const char *ct_proto_pair_host(int link) {
 void ct_proto_pair_again(int link) {
     /* A new hello gets a new challenge and a new exchange, hence a new code; the old
      * code stays on screen until then. */
-    if (ct_proto_pairing(link)) {
+    const ct_pair_stage_t stage = ct_proto_pair_stage(link);
+    if (stage == CT_PAIR_WAITING || stage == CT_PAIR_CODE) {
         forget_secrets(link);
         say_hello(link);
     }
+}
+
+void ct_proto_pair_confirm(int link, bool yes) {
+    if (ct_proto_pair_stage(link) != CT_PAIR_CONFIRM) {
+        return;
+    }
+    sec_t *sec = &s_links[link].sec;
+    s_links[link].pair = CT_PAIR_NONE;
+    if (!yes || !sec->have_new_key) {
+        /* The computer never said so: whoever sent "paired" is not the user's computer. */
+        forget_secrets(link);
+        ct_hal_net_close(link);
+        return;
+    }
+    char name[96], hex[2 * CT_KEY_BYTES + 1];
+    key_name(name, sizeof(name), s_links[link].host_id);
+    ct_hex(hex, sec->new_key, CT_KEY_BYTES);
+    ct_hal_store_set(name, hex);
+    ct_wipe(hex, sizeof(hex));
+    ct_wipe(sec->new_key, sizeof(sec->new_key));
+    sec->have_new_key = false;
+    /* Tell the computer (encrypted with the new key): it starts sending sessions. */
+    cJSON *msg = cJSON_CreateObject();
+    if (msg != NULL) {
+        cJSON_AddStringToObject(msg, "t", "paired");
+        send_json(link, msg);
+    }
+}
+
+void ct_proto_pair_reset(int link) {
+    if (ct_proto_pair_stage(link) != CT_PAIR_REFUSED) {
+        return;
+    }
+    char name[96];
+    key_name(name, sizeof(name), s_links[link].host_id);
+    ct_hal_store_set(name, NULL);
+    ask_to_pair(link); /* with the challenge that came with the refusal */
 }
 
 bool ct_proto_link_up(int link) {

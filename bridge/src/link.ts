@@ -8,6 +8,9 @@ import type { Pairing } from './pairing.ts';
 import { LIMITS, PROTO, parseFromDevice, type SessionSnapshot, type ToDevice } from './protocol.ts';
 import { Channel, commitOf, fromHex, linkKeys, newKeyPair, pairCode, pairKey, proofOf, random, same, sharedSecret, type KeyPair } from './secure.ts';
 
+/** A network device must have proven itself or paired within this long (a pairing window is 5 minutes). */
+export const HANDSHAKE_MS = 6 * 60 * 1000;
+
 /** This connection's challenge, and this computer's side of a pairing exchange. */
 interface Challenge {
   nonce: Buffer;
@@ -34,6 +37,8 @@ export interface LinkOptions {
   pairing?: Pairing;
   /** Where the random bytes for challenges and pairing come from. Only for repeatable screenshots; default: the OS. */
   entropy?: (bytes: number) => Buffer;
+  /** Ends the connection (a network device that took too long to prove itself or pair). */
+  drop?: () => void;
 }
 
 export const DEFAULT_QUICK = ['继续下一步', '跑一下测试', '提交这些改动', '先停一下，等我回电脑', '撤销刚才的修改'];
@@ -58,9 +63,12 @@ export class DeviceLink {
   /** Synced: the device is trusted (this machine) or proved it holds the key, or just paired. */
   private authed = false;
   private cancelPair: (() => void) | null = null;
+  private cancelHandshake: (() => void) | null = null;
   private challenge: Challenge | null = null;
   /** Network devices: every frame after auth is encrypted. */
   private channel: Channel | null = null;
+  /** Paired on this computer; waiting for the user to confirm it on the device too. */
+  private confirming = false;
 
   private readonly hub: Hub;
   private readonly clock: Clock;
@@ -77,6 +85,17 @@ export class DeviceLink {
     this.clock = clock;
     this.sendText = send;
     this.options = options;
+    // A network device has this long to prove itself or finish pairing, then it has to reconnect.
+    if (options.pairing && options.drop) {
+      this.cancelHandshake = clock.after(HANDSHAKE_MS, () => {
+        if (!this.authed) options.drop!();
+      });
+    }
+  }
+
+  /** Still proving itself or pairing (counts against the computer's limit on such connections). */
+  get pending(): boolean {
+    return !this.authed && !this.closed;
   }
 
   /** Handle one text frame. Returns false if the device should be disconnected. */
@@ -107,8 +126,16 @@ export class DeviceLink {
       return true;
     }
     if (this.device === null) return false;
+    if (msg.t === 'paired') {
+      // The user confirmed the pairing on the device as well (it came encrypted with the new key).
+      if (this.confirming && this.channel) {
+        this.confirming = false;
+        this.sync();
+      }
+      return true;
+    }
     if (msg.t === 'auth' || msg.t === 'pair') {
-      if (this.authed || !this.options.pairing || !this.challenge) return true;
+      if (this.authed || this.confirming || !this.options.pairing || !this.challenge) return true;
       if (msg.t === 'auth') this.checkProof(msg.nonce, msg.proof);
       else return this.startPairing(msg.pub, msg.r);
       return true;
@@ -123,6 +150,7 @@ export class DeviceLink {
 
   close(): void {
     this.closed = true;
+    this.cancelHandshake?.();
     this.cancelPair?.();
     this.unsubscribe?.();
     this.detach?.();
@@ -161,7 +189,11 @@ export class DeviceLink {
     this.sync();
   }
 
-  /** Returns false to drop the connection (too many requests are already waiting). */
+  /**
+   * The device asks to pair. Its code is only revealed while the user has a pairing
+   * window open on this computer, which rations the exchanges anyone can try. Returns
+   * false to drop the connection (too many devices are already waiting).
+   */
   private startPairing(pubHex: string, rHex: string): boolean {
     const c = this.challenge!;
     const devicePub = fromHex(pubHex, 32);
@@ -172,17 +204,26 @@ export class DeviceLink {
     c.spent = true;
     const code = pairCode(devicePub, c.keys.pub, deviceR, c.r);
     const key = pairKey(shared, devicePub, c.keys.pub, deviceR, c.r);
+    const cancel = this.options.pairing!.wait(this.deviceId!, this.device!, () => this.reveal(c, code, key, deviceR));
+    if (!cancel) return false;
+    // reveal() may have run already and set its own cancel.
+    if (this.cancelPair === null) this.cancelPair = cancel;
+    return true;
+  }
+
+  /** The window let this exchange through: file the request, then let the device work out the code. */
+  private reveal(c: Challenge, code: string, key: Buffer, deviceR: Buffer): void {
+    if (this.closed || this.challenge !== c) return;
     const cancel = this.options.pairing!.request(this.deviceId!, this.device!, code, key, () => {
+      // Approved here: the rest is encrypted, and waits for the user to confirm on the device too.
       this.cancelPair = null;
       this.secure(key, deviceR);
+      this.confirming = true;
       this.send({ t: 'paired' });
-      this.sync();
     });
-    if (!cancel) return false;
+    if (!cancel) return;
     this.cancelPair = cancel;
-    // Only now the value it committed to: the device can work out the code.
     this.send({ t: 'pairing', r: c.r.toString('hex') });
-    return true;
   }
 
   /** From here on every frame is encrypted with this connection's keys. */
