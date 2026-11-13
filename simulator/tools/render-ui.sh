@@ -46,3 +46,8 @@ snap 21-multi --tap $ROW1 --tap 240,308 --ms 16000 --tap $ROW2 --tap 240,282 --t
 snap 22-pair-wait --pair-wait
 snap 23-paired --pair --approve --tap 405,762 --ms 1000
 snap 24-pair-refused --pair --approve --tap 405,762 --unpair 0 --relink 0
+# The whole change of a request, a page at a time (wrapped lines make it longer than a screen).
+snap 25-diff --tap $ROW2 --tap 240,470
+snap 26-diff-page2 --tap $ROW2 --tap 240,470 --tap 435,650
+# Nobody answered on the device: the request went back to the computer and waits there.
+snap 27-at-computer --ms 490000

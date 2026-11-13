@@ -88,6 +88,8 @@ export interface SessionSnapshot {
   reply: boolean;
   now?: { verb: string; target: string; add?: number; del?: number };
   say?: string;
+  /** Running, but stuck on a prompt in its terminal that only the computer can answer (say tells why). */
+  there?: boolean;
   n: { read: number; edit: number; new: number; cmd: number; add: number; del: number };
   ctx?: number;
   todos?: { done: number; items: string[] };

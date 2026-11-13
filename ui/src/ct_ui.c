@@ -132,6 +132,7 @@ static void show_entry(void);
 static void show_diff(void);
 static void show_pair(void);
 static void show_plan(void);
+static void paginate_in(lv_obj_t *holder, int32_t room, lv_obj_t *pager);
 
 /* The activity entry on the entry screen. Entries have no id and the log shifts as
  * new ones arrive, so it is found again by its time, verb and target. */
@@ -209,6 +210,11 @@ static const char *host_prefix(const ct_session_t *s, char *buf, size_t size) {
 
 static bool is_waiting(ct_state_t state) {
     return state == CT_STATE_WAIT_APPROVE || state == CT_STATE_WAIT_ANSWER;
+}
+
+/* It waits for the user at the computer: a prompt there that the device can't answer. */
+static bool at_computer(const ct_session_t *s) {
+    return s->state == CT_STATE_RUNNING && s->there;
 }
 
 static bool wants_approval(const ct_session_t *s) {
@@ -311,6 +317,10 @@ static void fmt_took(char *buf, size_t size, const ct_session_t *s) {
 /* Right side of a list row. */
 static void fmt_when(char *buf, size_t size, const ct_session_t *s) {
     char a[32], b[24];
+    if (at_computer(s)) {
+        fmt_ago(buf, size, "等了 ", s->since);
+        return;
+    }
     switch (s->state) {
     case CT_STATE_WAIT_APPROVE:
     case CT_STATE_WAIT_ANSWER: fmt_ago(buf, size, "等了 ", s->since); break;
@@ -414,15 +424,19 @@ static void status_bar(lv_obj_t *screen) {
     ct_status_bar(screen, left, right);
 }
 
-static void state_chip(lv_obj_t *parent, ct_state_t state) {
+static void state_chip(lv_obj_t *parent, const ct_session_t *s) {
     /* Only sessions waiting for the user are shown white-on-black. */
-    ct_chip(parent, state_text(state), is_waiting(state), state == CT_STATE_RUNNING);
+    if (at_computer(s)) {
+        ct_chip(parent, "等电脑", true, false);
+        return;
+    }
+    ct_chip(parent, state_text(s->state), is_waiting(s->state), s->state == CT_STATE_RUNNING);
 }
 
 static void header(lv_obj_t *screen, const ct_session_t *s, lv_event_cb_t on_back) {
     status_bar(screen);
     lv_obj_t *nav = ct_nav(screen, s->name, on_back);
-    state_chip(nav, s->state);
+    state_chip(nav, s);
 }
 
 static void agent_meta(lv_obj_t *screen, const ct_session_t *s, const char *right) {
@@ -573,7 +587,7 @@ static void session_row(lv_obj_t *parent, const ct_session_t *s, int slot) {
         snprintf(buf, sizeof(buf), "%s · %s", s->agent, s->model);
     }
     ct_label_fill(r1, M18, buf);
-    state_chip(r1, s->state);
+    state_chip(r1, s);
 
     lv_obj_t *r2 = ct_row(row, 28, 0, 8);
     row_doing(r2, s);
@@ -633,7 +647,7 @@ static void show_list(void) {
     }
     int waiting = 0;
     for (int i = 0; i < count; i++) {
-        waiting += is_waiting(ct_model_at(i)->state) ? 1 : 0;
+        waiting += is_waiting(ct_model_at(i)->state) || at_computer(ct_model_at(i)) ? 1 : 0;
     }
 
     lv_obj_t *screen = ct_screen_new();
@@ -1271,6 +1285,23 @@ static void on_back_approve(lv_event_t *e) {
     show_approve();
 }
 
+static void on_diff_prev(lv_event_t *e) {
+    (void)e;
+    if (s_page > 0) {
+        s_page--;
+        show_diff();
+    }
+}
+
+static void on_diff_next(lv_event_t *e) {
+    (void)e;
+    if (s_page + 1 < s_done_pages) {
+        s_page++;
+        show_diff();
+    }
+}
+
+/* The whole change, a page at a time; approving stays at the bottom of every page. */
 static void show_diff(void) {
     const ct_session_t *s = current();
     if (s == NULL) {
@@ -1280,6 +1311,9 @@ static void show_diff(void) {
     if (!wants_approval(s)) {
         show_detail();
         return;
+    }
+    if (s_screen != SCR_DIFF) {
+        s_page = 0;
     }
     const ct_ask_t *ask = &s->ask;
     lv_obj_t *screen = ct_screen_new();
@@ -1303,7 +1337,23 @@ static void show_diff(void) {
     if (ask->has_stat && ask->add + ask->del > ask->line_count) {
         ct_paragraph(content, F18, "改动太长，这里只显示开头一段，完整内容要回电脑看。");
     }
+    lv_obj_t *nav = ct_row(screen, 60, CT_PAD, 10);
+    lv_obj_t *pager = ct_label(nav, MB20, "1/1");
+    ct_spacer(nav);
+    ct_button(nav, "‹", MB24, 60, 52, false, on_diff_prev, NULL);
+    ct_button(nav, "›", MB24, 60, 52, false, on_diff_next, NULL);
     approve_bar(screen, ask);
+
+    /* Lines that wrap can make it longer than a screen: the box's lines go in pages. */
+    lv_obj_update_layout(screen);
+    int32_t room = lv_obj_get_content_height(content) - (lv_obj_get_height(box) - lv_obj_get_content_height(box));
+    for (uint32_t i = 1; i < lv_obj_get_child_count(content); i++) {
+        room -= lv_obj_get_height(lv_obj_get_child(content, (int32_t)i)) + lv_obj_get_style_pad_row(content, 0);
+    }
+    paginate_in(box, room, pager);
+    if (s_done_pages == 1) {
+        lv_obj_add_flag(nav, LV_OBJ_FLAG_HIDDEN);
+    }
     present(screen, SCR_DIFF);
 }
 
@@ -1477,37 +1527,42 @@ static void report_para(lv_obj_t *parent, const ct_para_t *p) {
     lv_free(body_out);
 }
 
-/* Long reports and plans: split the paragraphs into pages that fit, show page s_page,
- * and say which in the pager label. */
-static void paginate(lv_obj_t *screen, lv_obj_t *content, lv_obj_t *pager) {
-    lv_obj_update_layout(screen);
-    const int32_t room = lv_obj_get_content_height(content);
-    const uint32_t count = lv_obj_get_child_count(content);
+/* Split holder's children (laid out already) into pages at most room high, show page
+ * s_page, and say which in the pager label. */
+static void paginate_in(lv_obj_t *holder, int32_t room, lv_obj_t *pager) {
+    const int32_t gap = lv_obj_get_style_pad_row(holder, 0);
+    const uint32_t count = lv_obj_get_child_count(holder);
     int page = 0;
     int32_t used = 0;
     for (uint32_t i = 0; i < count; i++) {
-        lv_obj_t *para = lv_obj_get_child(content, (int32_t)i);
-        const int32_t h = lv_obj_get_height(para);
+        lv_obj_t *part = lv_obj_get_child(holder, (int32_t)i);
+        const int32_t h = lv_obj_get_height(part);
         if (used > 0 && used + h > room) {
             page++;
             used = 0;
         }
-        used += h + 7;
-        lv_obj_set_user_data(para, (void *)(intptr_t)page);
+        used += h + gap;
+        lv_obj_set_user_data(part, (void *)(intptr_t)page);
     }
     s_done_pages = page + 1;
     if (s_page >= s_done_pages) {
         s_page = s_done_pages - 1;
     }
     for (uint32_t i = 0; i < count; i++) {
-        lv_obj_t *para = lv_obj_get_child(content, (int32_t)i);
-        if ((int)(intptr_t)lv_obj_get_user_data(para) != s_page) {
-            lv_obj_add_flag(para, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_t *part = lv_obj_get_child(holder, (int32_t)i);
+        if ((int)(intptr_t)lv_obj_get_user_data(part) != s_page) {
+            lv_obj_add_flag(part, LV_OBJ_FLAG_HIDDEN);
         }
     }
     char buf[16];
     snprintf(buf, sizeof(buf), "%d/%d", s_page + 1, s_done_pages);
     lv_label_set_text(pager, buf);
+}
+
+/* Long reports and plans: the paragraphs, a page at a time. */
+static void paginate(lv_obj_t *screen, lv_obj_t *content, lv_obj_t *pager) {
+    lv_obj_update_layout(screen);
+    paginate_in(content, lv_obj_get_content_height(content), pager);
 }
 
 static void on_done_prev(lv_event_t *e) {
@@ -2120,6 +2175,7 @@ void ct_ui_on_key(ct_key_t key, bool down) {
         else if (s_screen == SCR_DETAIL) on_detail_prev(NULL);
         else if (s_screen == SCR_DONE) on_done_prev(NULL);
         else if (s_screen == SCR_PLAN) on_plan_prev(NULL);
+        else if (s_screen == SCR_DIFF) on_diff_prev(NULL);
         break;
     case CT_KEY_VOL_DOWN:
     case CT_KEY_NEXT:
@@ -2127,6 +2183,7 @@ void ct_ui_on_key(ct_key_t key, bool down) {
         else if (s_screen == SCR_DETAIL) on_detail_next(NULL);
         else if (s_screen == SCR_DONE) on_done_next(NULL);
         else if (s_screen == SCR_PLAN) on_plan_next(NULL);
+        else if (s_screen == SCR_DIFF) on_diff_next(NULL);
         break;
     case CT_KEY_BOOT: {
         /* Talk: an answer on a question, what to change on a plan, else an instruction. */

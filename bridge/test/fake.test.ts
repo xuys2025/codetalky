@@ -7,11 +7,6 @@ import { DEMO_T0, demoScripts } from '../src/fake/scenario.ts';
 import { Hub } from '../src/hub.ts';
 import { LIMITS, type SessionSnapshot } from '../src/protocol.ts';
 
-/** Characters of code that fit in the device's diff box (18 px JetBrains Mono, 480 px screen). */
-const DIFF_COLUMNS = 37;
-/** Monospace columns: CJK and other wide characters take two. */
-const columns = (text: string) => [...text].reduce((n, ch) => n + (ch.codePointAt(0)! >= 0x2e80 ? 2 : 1), 0);
-
 /** Everything a snapshot promises the device, checked after every change. */
 function checkSnapshot(s: SessionSnapshot): void {
   const where = `${s.id} (${s.state})`;
@@ -33,9 +28,8 @@ function checkSnapshot(s: SessionSnapshot): void {
   const allLines = [...s.hunks.list.flatMap((h) => h.lines), ...(s.ask?.kind === 'approve' ? (s.ask.lines ?? []) : [])];
   for (const line of allLines) assert.match(line, /^[ +-]/, `${where}: diff line "${line}"`);
   for (const h of s.hunks.list) assert.ok(h.lines.length <= LIMITS.hunkLines, `${where}: hunk fits without trimming`);
-  for (const line of allLines) {
-    assert.ok(columns(line.slice(1)) <= DIFF_COLUMNS, `${where}: diff line too wide for the screen: "${line}"`);
-  }
+  // Lines may be wider than the screen, as real ones are: the device cuts them off in
+  // short views and wraps them on the full-change page.
   if (s.todos) assert.ok(s.todos.done <= s.todos.items.length, `${where}: todos`);
   assert.ok(s.since >= s.started || s.state === 'approve' || s.state === 'question', `${where}: since after started`);
   switch (s.state) {
@@ -139,7 +133,10 @@ test('codetalky: deny twice, and it writes the ideas down instead', () => {
 
 test('codetalky: nobody answers, so the hook gives up after 600 s', () => {
   const { get, until } = demo();
-  until('timeout', () => get('codetalky').log.some((e) => e.target === '没等到批准，这一步先跳过。'), 481);
+  until('timeout', () => get('codetalky').there === true, 481);
+  assert.deepEqual([get('codetalky').state, get('codetalky').say], ['running', '没等到设备回话，回电脑确认']);
+  until('the user at the computer', () => get('codetalky').log.some((e) => e.target === '在电脑上拒绝了，这一步先跳过。'));
+  assert.equal(get('codetalky').there, undefined);
   until('second request', () => get('codetalky').state === 'approve');
 });
 

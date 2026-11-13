@@ -41,22 +41,22 @@ static void copy_utf8(char *dst, size_t size, const char *src) {
 
 /* ---------- order ---------- */
 
-static int rank(ct_state_t state) {
-    switch (state) {
+static int rank(const ct_session_t *s) {
+    switch (s->state) {
     case CT_STATE_WAIT_APPROVE:
     case CT_STATE_WAIT_ANSWER: return 0;
-    case CT_STATE_ERROR: return 1;
-    case CT_STATE_DONE: return 2;
-    case CT_STATE_RUNNING: return 3;
-    default: return 4;
+    case CT_STATE_ERROR: return 2;
+    case CT_STATE_DONE: return 3;
+    case CT_STATE_RUNNING: return s->there ? 1 : 4; /* waiting for the user at the computer */
+    default: return 5;
     }
 }
 
 /* Waiting sessions: longest wait first. Everything else by name, so rows don't
  * shuffle on the screen while agents work. */
 static int compare(const ct_session_t *a, const ct_session_t *b) {
-    const int ra = rank(a->state);
-    const int rb = rank(b->state);
+    const int ra = rank(a);
+    const int rb = rank(b);
     if (ra != rb) {
         return ra - rb;
     }

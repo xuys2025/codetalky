@@ -107,6 +107,7 @@ typedef struct {
     int64_t since;   /* entered the current state */
     int64_t started; /* this round of work began */
     bool reply;      /* the device may send it instructions */
+    bool there;      /* running, but stuck on a prompt only the computer can answer (say tells why) */
 
     struct {
         const char *verb, *target; /* verb is NULL when nothing is going on */

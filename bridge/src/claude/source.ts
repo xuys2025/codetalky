@@ -72,6 +72,24 @@ const STOPPED_THERE = '在电脑上中断了，等你的下一条指令';
 const POLL_MS = 2000;
 /** How long an instruction typed into the terminal may take to show up as the agent's prompt. */
 const TAKEN_MS = 30_000;
+/** How long held requests wait for a device that dropped off (a Wi-Fi blip) to come back. */
+export const DEVICE_GRACE_MS = 30_000;
+
+/** The agent waits for the user at the computer: the device says so and shows it as such. */
+function waitThere(s: SessionSnapshot, why = WAITING_THERE): void {
+  s.say = why;
+  s.there = true;
+}
+
+/** Whatever it waited for at the computer has been dealt with. */
+function doneThere(s: SessionSnapshot): void {
+  if (s.there) {
+    delete s.there;
+    delete s.say;
+  } else if (s.say === WAITING_THERE) {
+    delete s.say;
+  }
+}
 
 /** A tool call's input for comparing two calls: keys in order, without the reason given for it. */
 function sameInput(input: Record<string, unknown>): string {
@@ -186,6 +204,8 @@ export class ClaudeSource {
   private readonly aliases = new Map<string, string>();
   private nextReq = 1;
   private cancelSweep: () => void;
+  /** The last device left a moment ago: stops the wait for it to come back. */
+  private deviceGrace: (() => void) | null = null;
   private cancelPoll: () => void = () => {};
   private readonly unsubscribe: () => void;
   private readonly unsubscribeRuns: () => void;
@@ -199,10 +219,7 @@ export class ClaudeSource {
     this.cancelSweep = this.scheduleSweep();
     if (this.agent === 'codex') this.cancelPoll = this.schedulePoll();
     this.unsubscribe = hub.subscribe((event) => {
-      // The last device left: give every held request back to the terminal.
-      if (event.type === 'devices' && hub.devices() === 0) {
-        for (const session of this.sessions.values()) this.releaseAll(session, '设备断开了，回电脑确认');
-      }
+      if (event.type === 'devices') this.devicesChanged();
       // An ended session's report has been seen: it can go now.
       if (event.type === 'changed' && this.sessions.get(event.id)?.ended && hub.get(event.id)?.state === 'idle') {
         this.forget(event.id);
@@ -216,10 +233,36 @@ export class ClaudeSource {
     this.unsubscribeRuns = options.runs?.subscribe((event) => this.onRun(event)) ?? (() => {});
   }
 
+  /**
+   * The last device left. Held requests wait a little for it to come back (a Wi-Fi
+   * blip, a restart), then go back to the terminal. Meanwhile new ones are held too.
+   */
+  private devicesChanged(): void {
+    if (this.hub.devices() > 0) {
+      this.deviceGrace?.();
+      this.deviceGrace = null;
+      return;
+    }
+    if (this.deviceGrace) return;
+    this.deviceGrace = this.clock.after(DEVICE_GRACE_MS, () => {
+      this.deviceGrace = null;
+      if (this.hub.devices() > 0) return;
+      for (const session of this.sessions.values()) this.releaseAll(session, '设备断开了，回电脑确认', true);
+    });
+  }
+
+  /** No device to ask, nor one expected back soon. */
+  private noDevice(): boolean {
+    return this.hub.devices() === 0 && this.deviceGrace === null;
+  }
+
   /** A managed terminal opened or closed. */
   private onRun(event: RunEvent): void {
     if (event.type === 'started' && event.agent === this.agent) {
-      this.waitFor(event.run, event.cwd);
+      // A launcher that lost its connection and got it back: its sessions take instructions again.
+      const known = [...this.sessions.values()].filter((s) => s.token === event.run);
+      for (const session of known) this.setToken(session, event.run);
+      if (known.length === 0) this.waitFor(event.run, event.cwd);
       return;
     }
     for (const session of [...this.sessions.values()]) {
@@ -302,6 +345,7 @@ export class ClaudeSource {
     this.cancelPoll();
     this.unsubscribe();
     this.unsubscribeRuns();
+    this.deviceGrace?.();
     for (const session of this.sessions.values()) this.releaseAll(session, '');
   }
 
@@ -372,7 +416,11 @@ export class ClaudeSource {
   }
 
   private change(id: string, fn: (s: SessionSnapshot) => void): void {
-    this.hub.update(id, fn);
+    this.hub.update(id, (s) => {
+      fn(s);
+      // Waiting at the computer is something it does while working; not once it stopped or asks the device.
+      if (s.there && s.state !== 'running') doneThere(s);
+    });
   }
 
   private log(s: SessionSnapshot, entry: Omit<SessionSnapshot['log'][number], 'at'>): void {
@@ -487,7 +535,7 @@ export class ClaudeSource {
             delete s.now;
             delete s.say; // the last report's words; new ones come from the transcript
           }
-          if (s.say === WAITING_THERE) delete s.say;
+          doneThere(s);
           if (session.queued.length > 0) s.say = waitingSay(session.queued);
           this.log(s, { verb: '你', target: firstLine(str(event.prompt) ?? '') });
         });
@@ -503,7 +551,7 @@ export class ClaudeSource {
             s.state = 'running';
             s.since = this.now();
           }
-          if (s.say === WAITING_THERE) delete s.say;
+          doneThere(s);
           if (tool === 'TodoWrite') {
             const todos = todosFrom(input);
             if (todos) s.todos = todos;
@@ -519,7 +567,7 @@ export class ClaudeSource {
       case 'PostToolUse':
         this.settled(session, tool, input, str(event.tool_use_id));
         this.change(id, (s) => {
-          if (s.say === WAITING_THERE) delete s.say;
+          doneThere(s);
           if (tool === 'TodoWrite' || tool === 'AskUserQuestion') return;
           // Codex's session file has its file changes, with the exact diff.
           if (session.rollout && this.tools.isFileTool(tool)) return;
@@ -529,7 +577,7 @@ export class ClaudeSource {
       case 'PostToolUseFailure':
         this.settled(session, tool, input, str(event.tool_use_id));
         this.change(id, (s) => {
-          if (s.say === WAITING_THERE) delete s.say;
+          doneThere(s);
           const full = this.tools.targetOf(tool, input, cwd);
           const target = this.tools.isFileTool(tool) ? baseName(full) : full;
           this.log(s, { verb: this.tools.verbOf(tool), target, res: event.is_interrupt === true ? '中断' : '失败', bad: true });
@@ -538,7 +586,7 @@ export class ClaudeSource {
       case 'Notification':
         if (event.notification_type === 'permission_prompt' && session.held.length === 0) {
           this.change(id, (s) => {
-            s.say = WAITING_THERE;
+            waitThere(s);
           });
         }
         return NO_DECISION;
@@ -597,7 +645,7 @@ export class ClaudeSource {
     this.keep(s, 'apply_patch', target, result);
     // It is done: if it is still what the session shows as running, it isn't any more.
     if (s.now?.verb === 'Edit' && s.state === 'running') delete s.now;
-    if (s.say === WAITING_THERE) delete s.say;
+    doneThere(s);
   }
 
   private keep(s: SessionSnapshot, tool: string, target: string, result: ToolResult): void {
@@ -674,7 +722,7 @@ export class ClaudeSource {
     const now = this.now();
     if (head.ask.kind !== 'question') head.ask.until = now + this.options.holdSeconds;
     head.cancelTimer = this.clock.after(this.options.holdSeconds * 1000, () => {
-      this.release(session, head, '没等到设备回话，回电脑确认');
+      this.release(session, head, '没等到设备回话，回电脑确认', true);
     });
     this.change(session.id, (s) => {
       s.state = head.ask.kind === 'question' ? 'question' : 'approve';
@@ -701,8 +749,8 @@ export class ClaudeSource {
     }
   }
 
-  /** Hand a held request back to the terminal. */
-  private release(session: Session, held: Held, why: string): void {
+  /** Hand a held request back to the terminal. there: it is still to be answered there, so it waits for the user. */
+  private release(session: Session, held: Held, why: string, there = false): void {
     const at = session.held.indexOf(held);
     if (at < 0) return;
     held.finish(NO_DECISION);
@@ -713,13 +761,14 @@ export class ClaudeSource {
     }
     if (why) {
       this.change(session.id, (s) => {
-        s.say = why;
+        if (there && s.state === 'running') waitThere(s, why);
+        else s.say = why;
       });
     }
   }
 
-  private releaseAll(session: Session, why: string): void {
-    for (const held of [...session.held].reverse()) this.release(session, held, why);
+  private releaseAll(session: Session, why: string, there = false): void {
+    for (const held of [...session.held].reverse()) this.release(session, held, why, there);
   }
 
   /** The agent moved on: whatever prompt was up in its terminal has been answered there. */
@@ -743,11 +792,11 @@ export class ClaudeSource {
       const body = this.tools.askOf(tool, input, cwd);
       this.change(session.id, (s) => {
         s.now = { verb: body.verb, target: body.target, add: body.add, del: body.del };
-        s.say = WAITING_THERE;
+        waitThere(s);
       });
       return Promise.resolve(NO_DECISION);
     }
-    if (this.hub.devices() === 0) return Promise.resolve(NO_DECISION);
+    if (this.noDevice()) return Promise.resolve(NO_DECISION);
     const body = this.tools.askOf(tool, input, cwd);
     const snapshot = this.hub.get(session.id);
     if (!body.why && snapshot?.say) body.why = snapshot.say;
@@ -763,7 +812,7 @@ export class ClaudeSource {
   }
 
   private holdQuestion(session: Session, input: Record<string, unknown>, gone?: AbortSignal): Promise<PostReply> {
-    if (this.hub.devices() === 0) return Promise.resolve(NO_DECISION);
+    if (this.noDevice()) return Promise.resolve(NO_DECISION);
     const questions = (Array.isArray(input.questions) ? input.questions : [])
       .map(obj)
       .filter((q) => typeof q.question === 'string' && Array.isArray(q.options))
@@ -805,7 +854,7 @@ export class ClaudeSource {
 
   /** Claude finished planning and wants to start: show the plan, approve it or send it back. */
   private holdPlan(session: Session, input: Record<string, unknown>, gone?: AbortSignal): Promise<PostReply> {
-    if (this.hub.devices() === 0) return Promise.resolve(NO_DECISION);
+    if (this.noDevice()) return Promise.resolve(NO_DECISION);
     const text = str(input.plan) ?? '';
     const req = `r${this.nextReq++}`;
     const plan = reportFromMarkdown(text);
@@ -853,7 +902,7 @@ export class ClaudeSource {
       void pressed.then((ok) => {
         if (!session.held.includes(head)) return; // answered at the computer meanwhile
         if (!ok) {
-          this.release(session, head, '终端里没找到这个确认框，回电脑确认');
+          this.release(session, head, '终端里没找到这个确认框，回电脑确认', true);
           return;
         }
         head.finish(NO_DECISION);
@@ -940,7 +989,9 @@ export class ClaudeSource {
     return this.clock.after(SWEEP_EVERY_MS, () => {
       const cutoff = this.now() - FORGET_AFTER_S;
       for (const [id, session] of this.sessions) {
-        if (session.lastEvent < cutoff && session.held.length === 0) this.forget(id);
+        // A terminal started with codetalky that is still open keeps its session, however quiet.
+        const open = session.token !== null && (this.options.runs?.has(session.token) ?? false);
+        if (session.lastEvent < cutoff && session.held.length === 0 && !open) this.forget(id);
       }
       this.cancelSweep = this.scheduleSweep();
     });

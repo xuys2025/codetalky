@@ -164,11 +164,17 @@ const HOOKS_TIMEOUT = [
   ' // 等设备回话的最长时间',
   '-const TIMEOUT_S = 60;',
   '+const TIMEOUT_S = 600;',
+  '+// 没带会话号的请求分不清是哪个终端发来的，直接拒绝，免得在设备上批准到别处去',
   ' export async function onAsk(req) {',
   '+  if (!req.sessionId) {',
-  "+    return deny('no session');",
+  "+    return deny('no session: this request did not say which terminal it came from');",
   '+  }',
   '   const card = toCard(req);',
+  '-  const answer = await device.ask(card);',
+  '+  const answer = await device.ask(card, { timeoutMs: TIMEOUT_S * 1000, onTimeout: () => backToTerminal(req, card.id) });',
+  '+  log.info(`answered ${card.id} from ${answer.from} after ${answer.tookMs} ms: ${answer.allow ? "allow" : "deny"}`);',
+  '   return answer;',
+  ' }',
 ];
 
 const HOOKS_SESSION_ONLY = [
@@ -281,14 +287,14 @@ function codetalky(): FakeScript {
         ask: {
           verb: 'Edit',
           target: 'src/bridge/hooks.ts',
-          add: 4,
-          del: 1,
+          add: 7,
+          del: 2,
           line: 41,
           lines: HOOKS_TIMEOUT,
           why: '60 秒太短，在设备上来不及点。改成 600 秒，并拒绝没带会话号的请求。',
         },
         allow: [
-          edit('src/bridge/hooks.ts', 4, 1, { line: 41, lines: HOOKS_TIMEOUT }, 3),
+          edit('src/bridge/hooks.ts', 7, 2, { line: 41, lines: HOOKS_TIMEOUT }, 3),
           todo(3),
           say('改好了。再补两条测试：超时之内能批准，没带会话号会被拒绝。'),
           write(

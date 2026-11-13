@@ -43,6 +43,8 @@ export interface FakeScript {
 }
 
 const APPROVE_TIMEOUT_S = 600;
+/** In the demo, how long after a request goes back to the computer the user gets there and answers it. */
+const AT_COMPUTER_S = 40;
 const COUNTED: Record<string, 'read' | 'edit' | 'new' | 'cmd'> = {
   Read: 'read',
   Grep: 'read',
@@ -192,11 +194,21 @@ export class FakeAgent {
           s.now = { verb: step.ask.verb, target: step.ask.target, add: step.ask.add, del: step.ask.del };
           s.ask = { kind: 'approve', req, ...step.ask, until: since + APPROVE_TIMEOUT_S };
         });
-        // A real hook gives up after its timeout and the agent asks in the terminal instead.
+        // A real hook gives up after its timeout and the agent asks in the terminal
+        // instead; here the user gets to the computer a little later and says no.
         this.wait(since + APPROVE_TIMEOUT_S - now, () => {
-          this.queue.unshift({ do: 'say', text: '没等到批准，这一步先跳过。' }, ...step.deny);
-          this.change((s) => this.resume(s));
-          this.next();
+          this.change((s) => {
+            this.resume(s);
+            s.say = '没等到设备回话，回电脑确认';
+            s.there = true;
+          });
+          this.wait(AT_COMPUTER_S, () => {
+            this.queue.unshift({ do: 'say', text: '在电脑上拒绝了，这一步先跳过。' }, ...step.deny);
+            this.change((s) => {
+              delete s.there;
+            });
+            this.next();
+          });
         });
         break;
       }

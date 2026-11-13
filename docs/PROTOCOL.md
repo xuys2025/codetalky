@@ -53,6 +53,7 @@
   "reply": true,            // 能不能从设备给它发新指令
   "now": { "verb": "Edit", "target": "display/epd_driver.c", "add": 18, "del": 7 },
   "say": "局刷后残影没清干净……",   // agent 最近说的一段话
+  "there": true,            // 可省：在干活，但卡在电脑上的确认框，设备答不了（say 说为什么），设备显示“等电脑”
   "n": { "read": 21, "edit": 4, "new": 1, "cmd": 6, "add": 132, "del": 40 },
   "ctx": 46,                // 上下文用了百分之几，可省
   "todos": { "done": 3, "items": ["复现残影问题", "读刷新相关代码"] },

@@ -460,6 +460,7 @@ static ct_session_t *parse_session(const cJSON *j) {
     s->since = time_of(j, "since");
     s->started = time_of(j, "started");
     s->reply = cJSON_IsTrue(field(j, "reply"));
+    s->there = cJSON_IsTrue(field(j, "there"));
 
     const cJSON *now = field(j, "now");
     if (cJSON_IsObject(now)) {

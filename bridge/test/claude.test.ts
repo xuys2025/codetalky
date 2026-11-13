@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { claudeHooks, mergeHooks, removeHooks } from '../src/claude/hooks.ts';
-import { ClaudeSource } from '../src/claude/source.ts';
+import { ClaudeSource, DEVICE_GRACE_MS } from '../src/claude/source.ts';
 import { claudeTools, dropCd, isRisky, targetOf } from '../src/claude/tools.ts';
 import { ManualClock } from '../src/clock.ts';
 import { Hub } from '../src/hub.ts';
@@ -153,13 +153,27 @@ test('another edit of the same file finishing does not let go of a held one', as
   assert.deepEqual(await a, { status: 200 });
 });
 
-test('the device leaving hands every held request back to the terminal', async () => {
-  const { detach, send, get } = setup();
+test('the device leaving hands every held request back to the terminal, after a grace for it to come back', async () => {
+  const { clock, hub, detach, send, get } = setup();
   const reply = send('PermissionRequest', edit);
   await settled(reply);
+  // A Wi-Fi blip: it comes back in time, and the request is still there to approve.
   detach();
+  clock.advance(DEVICE_GRACE_MS - 1000);
+  assert.equal(await settled(reply), 'pending');
+  const again = hub.attachDevice();
+  clock.advance(DEVICE_GRACE_MS);
+  assert.equal(await settled(reply), 'pending');
+  assert.equal(get().state, 'approve');
+  // Gone for good: the request goes back to the terminal, where it still waits for the user.
+  again();
+  detach();
+  clock.advance(DEVICE_GRACE_MS);
   assert.deepEqual(await reply, { status: 200 });
-  assert.equal(get().state, 'running');
+  assert.deepEqual([get().state, get().there, get().say], ['running', true, '设备断开了，回电脑确认']);
+  // Answered there: it goes on, and no longer waits.
+  await send('PostToolUse', { ...edit, tool_response: { filePath: edit.tool_input.file_path, structuredPatch: [] } });
+  assert.deepEqual([get().state, get().there, get().say], ['running', undefined, undefined]);
 });
 
 test('requests made at the same time are shown one after another', async () => {
@@ -463,6 +477,35 @@ test('a managed Claude run keeps one entry on the device across /clear', async (
   await send('11111111-2222-4333-8444-555555555555', 'SessionEnd', { reason: 'prompt_input_exit' });
   remove();
   assert.equal(hub.get(ID), undefined, 'nothing to keep: it was not done');
+  source.stop();
+});
+
+test('a managed terminal that reconnects takes instructions again, and stays overnight while open', async () => {
+  const clock = new ManualClock(T0 * 1000);
+  const hub = new Hub(clock);
+  hub.attachDevice();
+  const runs = new Runs();
+  const source = new ClaudeSource(hub, clock, { holdSeconds: 300, log: () => {}, runs });
+  const TOKEN = 'eeeeeeee-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  let remove = runs.add(TOKEN, 'claude', 'D:\\work\\shop', () => {});
+  const ID = 'run-eeeeeeee';
+  const send = (event: string, extra: Record<string, unknown> = {}) =>
+    source.handle({ session_id: SID, cwd: 'D:\\work\\shop', hook_event_name: event, ...extra }, { 'x-codetalky-run': TOKEN });
+  await send('SessionStart', { source: 'startup' });
+  await send('UserPromptSubmit', { prompt: '第一件事' });
+  await send('Stop', { last_assistant_message: '好了' });
+  // The launcher's connection to the bridge drops and comes back.
+  remove();
+  assert.equal(hub.get(ID)!.reply, false);
+  remove = runs.add(TOKEN, 'claude', 'D:\\work\\shop', () => {});
+  assert.deepEqual([hub.list().length, hub.get(ID)!.reply], [1, true]);
+  // A quiet night with the terminal open: the session is still there in the morning.
+  clock.advance(14 * 3600 * 1000);
+  assert.equal(hub.get(ID)?.reply, true);
+  // Once its terminal is closed, a quiet session goes as before.
+  remove();
+  clock.advance(14 * 3600 * 1000);
+  assert.equal(hub.get(ID), undefined);
   source.stop();
 });
 
