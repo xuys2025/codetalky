@@ -276,7 +276,19 @@ test('hook settings are merged into a settings file and taken out again', () => 
   const merged = JSON.parse(readFileSync(file, 'utf8'));
   assert.equal(merged.model, 'opus');
   assert.equal(merged.hooks.Stop.length, 2);
-  assert.deepEqual(merged.hooks.PermissionRequest, [{ hooks: [{ type: 'http', url: 'http://127.0.0.1:8137/hooks/claude', timeout: 600 }] }]);
+  assert.deepEqual(merged.hooks.PermissionRequest, [
+    {
+      hooks: [
+        {
+          type: 'http',
+          url: 'http://127.0.0.1:8137/hooks/claude',
+          timeout: 600,
+          headers: { 'x-codetalky-run': '$CODETALKY_RUN' },
+          allowedEnvVars: ['CODETALKY_RUN'],
+        },
+      ],
+    },
+  ]);
   mergeHooks(file, 8137, 570); // again: no duplicates
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).hooks.Stop.length, 2);
   removeHooks(file, 8137);

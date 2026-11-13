@@ -2,7 +2,7 @@
 // same port also serves the browser simulator so one command runs the whole demo.
 
 import { createReadStream, statSync } from 'node:fs';
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { extname, resolve, sep } from 'node:path';
 import { WebSocketServer } from 'ws';
@@ -10,6 +10,10 @@ import { WebSocketServer } from 'ws';
 import type { Clock } from './clock.ts';
 import type { Hub } from './hub.ts';
 import { DeviceLink, type LinkOptions } from './link.ts';
+import { parseFromRun, type Runs, type ToRun } from './runs.ts';
+
+/** Handles a POST from an agent hook; headers carry the managed-run token. */
+export type PostHandler = (body: unknown, headers: IncomingHttpHeaders) => Promise<PostReply>;
 
 /** Answer to a POST from an agent hook. */
 export interface PostReply {
@@ -23,7 +27,9 @@ export interface ServerOptions extends LinkOptions {
   /** Directory of the browser simulator to serve at /, or null. */
   simDir: string | null;
   /** JSON POST endpoints for agent hooks, by path. Only reachable from this machine. */
-  post?: Record<string, (body: unknown) => Promise<PostReply>>;
+  post?: Record<string, PostHandler>;
+  /** Managed runs, whose launchers connect to /run. */
+  runs?: Runs;
   /** Let devices connect from other machines. There is no pairing yet, so off by default. */
   allowRemoteDevices?: boolean;
   log: (line: string) => void;
@@ -110,7 +116,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
  * web pages (which always send Origin) and other machines on the network out.
  */
 function handlePost(
-  handler: (body: unknown) => Promise<PostReply>,
+  handler: PostHandler,
   req: IncomingMessage,
   res: ServerResponse,
   log: (line: string) => void,
@@ -136,7 +142,7 @@ function handlePost(
     } catch {
       return sendJson(res, 400, { error: 'bad json' });
     }
-    handler(body).then(
+    handler(body, req.headers).then(
       (reply) => {
         if (!res.destroyed) sendJson(res, reply.status, reply.body);
       },
@@ -173,6 +179,27 @@ export function startServer(hub: Hub, clock: Clock, options: ServerOptions): Pro
   const sockets = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
   http.on('upgrade', (req, socket, head) => {
     const path = new URL(req.url ?? '/', 'http://x').pathname;
+    // Launchers of managed runs: this machine only, never a web page.
+    if (path === '/run' && options.runs) {
+      const runs = options.runs;
+      if (!isLoopback(req) || req.headers.origin !== undefined) {
+        socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      sockets.handleUpgrade(req, socket, head, (ws) => {
+        let remove: (() => void) | null = null;
+        ws.on('message', (data, isBinary) => {
+          const msg = isBinary ? null : parseFromRun(data.toString());
+          if (!msg || remove) return;
+          remove = runs.add(msg.run, msg.agent, msg.cwd, (text) => ws.send(JSON.stringify({ t: 'type', text } satisfies ToRun)));
+          options.log(`managed ${msg.agent || 'agent'} started in ${msg.cwd}`);
+        });
+        ws.on('close', () => remove?.());
+        ws.on('error', () => ws.terminate());
+      });
+      return;
+    }
     const remoteRefused = !isLoopback(req) && !options.allowRemoteDevices;
     if (path !== '/device' || !originAllowed(req) || remoteRefused) {
       if (remoteRefused) options.log(`refused a device from ${req.socket.remoteAddress ?? '?'}: no pairing yet (see --insecure-lan)`);

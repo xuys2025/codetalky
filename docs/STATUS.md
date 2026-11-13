@@ -192,8 +192,17 @@ node src/main.ts hooks --remove ~/.claude/settings.json  # 不用了就撤掉
    - 语音确认里的文字是写死的（第 3 阶段接豆包后才有真的）。
 7. （已做）接 Claude Code 的钩子，跑通真实的批准闭环（第 2 阶段）。
 8. （已做）在 WSL 里装 ESP-IDF v5.5.4，官方固件原样编译通过（`Metalio-E-Ink4.bin`，4.16 MB）。脚本 `tools/esp/install-idf.sh` 可重跑：Python 3.12 用 uv 装（系统的 3.14 太新）；ESP-IDF 和工具链都从乐鑫镜像 dl.espressif.com 下载，不用代理；openocd 缺的 libusb 不用 sudo，下载 Ubuntu 的包解压到 `~/esp/libusb`；官方资源打包要的 qoi-conv 预先装好。官方仓库在 WSL 里重新克隆到 `~/work/metalio`，符号链接才是真的。
-9. 托管终端：`codetalky claude` / `codetalky codex` 在伪终端里启动 agent，设备发的指令写进去（Windows 用 ConPTY）。
+9. （已做，待真实测试）托管终端：`codetalky claude` 在伪终端里启动 Claude Code（node-pty 的预编译版 `@lydell/node-pty`，Windows 上走 ConPTY），你照常用。启动时生成一个运行标记放进环境变量 `CODETALKY_RUN`，钩子把它放在请求头里带回来，电脑端服务就知道这个会话是托管的，设备上的“发指令”“回复”随之打开。设备发来的指令合成一行，先输入文字，停 150 毫秒再按回车（免得被当成粘贴）。启动器退出后“发指令”自动关掉；电脑端服务重启后启动器 3 秒内自动重连。用假的命令行程序测过整条链路，真 Claude Code 还没测。
 10. 接 Codex（`~/.codex/hooks.json`，先核对它的记录格式和钩子事件）。
+
+## 最后一起跑的真实测试（花额度，攒到最后一起做）
+
+你说过要花额度的测试留到最后一起安排。都用最便宜的 haiku，在临时目录里跑：
+
+1. 托管终端 + 真 Claude Code：钩子能不能把 `CODETALKY_RUN` 放进请求头（文档说支持，没实测）；设备发的指令能不能打进 Claude Code 的输入框并提交（粘贴检测、回车时机）；它正忙时发指令是否排队。
+2. 交互式会话里的批准：终端在等设备时是什么样子，设备批准后终端是否立刻继续，期限到了是否照常弹确认框。之前只在 `claude -p` 里测过批准，交互式只测过提问。
+3. Codex 接上以后的同样几项。
+4. 多台电脑的真实场景：要第二台电脑，需要你来配合。
 
 ## 常用命令
 
@@ -204,6 +213,8 @@ bash simulator/build.sh
 cd bridge && npm run demo
 # 让 Claude Code 把事件发给电脑端服务（撤掉用 --remove）
 cd bridge && node src/main.ts hooks --merge ~/.claude/settings.json
+# 用托管终端启动 Claude Code，设备可以给它发指令（先在 bridge 目录 npm link 一次）
+codetalky claude
 # 电脑端的类型检查和测试
 cd bridge && npm run check && npm test
 # 不开浏览器，按真机像素出全部界面图

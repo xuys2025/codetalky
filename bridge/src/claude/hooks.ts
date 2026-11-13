@@ -3,6 +3,8 @@
 
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 
+import { RUN_ENV, RUN_HEADER } from '../runs.ts';
+
 /** Events that can wait for the device; the rest answer at once. */
 const HELD = new Set(['PreToolUse', 'PermissionRequest']);
 const EVENTS = [
@@ -39,8 +41,22 @@ export function hookSettings(port: number, holdSeconds: number): Settings {
   const url = hookUrl(port);
   const hooks: Record<string, HookGroup[]> = {};
   for (const event of EVENTS) {
-    // Held events get a little more than the hold, so the bridge always answers first.
-    hooks[event] = [{ hooks: [{ type: 'http', url, timeout: HELD.has(event) ? holdSeconds + 30 : 5 }] }];
+    hooks[event] = [
+      {
+        hooks: [
+          {
+            type: 'http',
+            url,
+            // Held events get a little more than the hold, so the bridge always answers first.
+            timeout: HELD.has(event) ? holdSeconds + 30 : 5,
+            // Sessions started by `codetalky claude` carry their run token, so the
+            // device can type into their terminal. Empty for plain sessions.
+            headers: { [RUN_HEADER]: '$' + RUN_ENV },
+            allowedEnvVars: [RUN_ENV],
+          },
+        ],
+      },
+    ];
   }
   return { hooks };
 }

@@ -61,11 +61,15 @@ node src/main.ts            # 起服务；加 --fake 可以同时看演示会话
 
 之后在任何终端里开的 Claude Code 会话都会出现在设备上，批准请求和它的提问可以在设备上回答。设备没连上或期限内没回话时，Claude Code 照常在终端里问你。不用了就 `node src/main.ts hooks --remove ~/.claude/settings.json`。细节见 `docs/STATUS.md` 的“第 7 项”。
 
+想从设备给 Claude 发新指令，用 `codetalky claude` 代替 `claude` 启动（参数照旧）。在 `bridge` 目录运行一次 `npm link`，之后任何终端里都有 `codetalky` 命令；不想装就用 `node <仓库>/bridge/src/main.ts claude`。它在终端里看起来和直接运行 `claude` 一样，设备发来的指令会像键盘输入一样打进去。
+
+有几台电脑跑 agent，就在每台上都开电脑端服务，用 `--name` 起个名字（比如 `--name 台式机`），设备会同时连上所有电脑。
+
 ## 现状
 
 第 1 阶段（设计与骨架）进行中。硬件未到货，开发都在仿真器上做。
 
 - 已有：九个触摸界面（`ui/src/ct_ui.c`），数据从电脑端服务经 WebSocket 收来；电脑端服务（`bridge/`），接了 Claude Code 的钩子，还有按剧本走的假 agent；字库生成工具；仿真器（只刷有变化的像素，先黑白、停下后叠加灰度，参数是占位值）；无浏览器截图工具。
-- 还没有：从设备给普通终端里的会话发新指令（托管终端）、Codex、语音、配对口令、固件工程。
+- 还没有：Codex、语音、配对口令、固件工程。
 
 进度和结论见 `docs/STATUS.md`。

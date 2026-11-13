@@ -22,11 +22,14 @@ import { Hub } from './hub.ts';
 import { Glyphs } from './glyphs.ts';
 import { bridgeId, defaultName } from './identity.ts';
 import { DEFAULT_QUICK } from './link.ts';
+import { runManaged } from './run.ts';
+import { Runs } from './runs.ts';
 import { startServer } from './server.ts';
 
 const USAGE = `usage: node src/main.ts [--name N] [--fake] [--fake-only IDS] [--speed N] [--hold S]
                         [--host H] [--port P] [--no-sim] [--insecure-lan]
        node src/main.ts hooks [--merge FILE | --remove FILE] [--port P] [--hold S]
+       node src/main.ts claude [claude's own options]     (or codex, or run -- CMD ...)
 
   --name N        this computer's name on the device, e.g. 台式机 (default: the computer name)
   --fake          also run six scripted demo sessions
@@ -43,7 +46,10 @@ const USAGE = `usage: node src/main.ts [--name N] [--fake] [--fake-only IDS] [--
   hooks           print hook settings that send Claude Code's events to the bridge
   --merge FILE    add them to a Claude Code settings file, e.g. ~/.claude/settings.json
                   (a copy of the old file is kept as FILE.codetalky.bak)
-  --remove FILE   take them out of that file again`;
+  --remove FILE   take them out of that file again
+
+  claude, codex   start the agent in this terminal as usual, and let the device send it
+                  instructions (the bridge must be running; CODETALKY_PORT if not 8137)`;
 
 function fail(message: string): never {
   console.error(`${message}\n\n${USAGE}`);
@@ -61,7 +67,28 @@ interface ServeOptions {
   insecureLan: boolean;
 }
 
+/** `codetalky claude ...`, `codetalky codex ...`, `codetalky run -- CMD ...`: everything after goes to the agent. */
+function launch(argv: string[]): boolean {
+  const [command, ...rest] = argv;
+  let agent: string | undefined;
+  let args = rest;
+  if (command === 'claude' || command === 'codex') {
+    agent = command;
+  } else if (command === 'run') {
+    const start = rest[0] === '--' ? 1 : 0;
+    agent = rest[start];
+    args = rest.slice(start + 1);
+    if (!agent) fail('run: which command?');
+  } else {
+    return false;
+  }
+  const port = Number(process.env.CODETALKY_PORT ?? 8137);
+  runManaged({ port, agent, args }).then((code) => process.exit(code));
+  return true;
+}
+
 function main(): void {
+  if (launch(process.argv.slice(2))) return;
   let parsed;
   try {
     parsed = parseArgs({
@@ -125,7 +152,8 @@ function main(): void {
 function serve(o: ServeOptions): void {
   const log = (line: string) => console.log(`[${new Date().toTimeString().slice(0, 8)}] ${line}`);
   const hub = new Hub(realClock);
-  const claude = new ClaudeSource(hub, realClock, { holdSeconds: o.hold, log });
+  const runs = new Runs();
+  const claude = new ClaudeSource(hub, realClock, { holdSeconds: o.hold, log, runs });
   const demoClock = o.speed === 1 ? realClock : fastClock(o.speed);
   const scripts = o.fake === null ? [] : demoScripts().filter((s) => o.fake!.length === 0 || o.fake!.includes(s.initial(0).id));
   const agents = scripts.map((script) => new FakeAgent(hub, demoClock, script));
@@ -136,7 +164,8 @@ function serve(o: ServeOptions): void {
     host: o.host,
     port: o.port,
     simDir,
-    post: { '/hooks/claude': (body) => claude.handle(body) },
+    post: { '/hooks/claude': (body, headers) => claude.handle(body, headers) },
+    runs,
     allowRemoteDevices: o.insecureLan,
     hostName: o.name,
     hostId: bridgeId(o.port),

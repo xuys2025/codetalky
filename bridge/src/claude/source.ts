@@ -9,6 +9,9 @@
 import { LIMITS, type ApproveAsk, type QuestionAsk, type SessionSnapshot } from '../protocol.ts';
 import type { Clock } from '../clock.ts';
 import type { Hub } from '../hub.ts';
+import type { IncomingHttpHeaders } from 'node:http';
+
+import { RUN_HEADER, type Runs } from '../runs.ts';
 import type { PostReply } from '../server.ts';
 import { firstWords, reportFromMarkdown, shortModel } from './text.ts';
 import { askOf, counterOf, isFileTool, resultOf, targetOf, verbOf } from './tools.ts';
@@ -17,6 +20,8 @@ import { TranscriptTail, todosFrom } from './transcript.ts';
 export interface ClaudeOptions {
   /** How long a permission request or question waits for the device, in seconds. */
   holdSeconds: number;
+  /** Managed runs (codetalky claude): their sessions can take instructions from the device. */
+  runs?: Runs;
   log: (line: string) => void;
 }
 
@@ -67,6 +72,8 @@ interface Session {
   held: Held[];
   /** Claude Code has exited; kept only until its report has been seen. */
   ended: boolean;
+  /** The run token its hooks carry, if it was started with codetalky claude. */
+  token: string | null;
 }
 
 export class ClaudeSource {
@@ -77,6 +84,7 @@ export class ClaudeSource {
   private nextReq = 1;
   private cancelSweep: () => void;
   private readonly unsubscribe: () => void;
+  private readonly unsubscribeRuns: () => void;
 
   constructor(hub: Hub, clock: Clock, options: ClaudeOptions) {
     this.hub = hub;
@@ -93,21 +101,47 @@ export class ClaudeSource {
         this.forget(event.id);
       }
     });
+    // A managed terminal opened or closed: its sessions can or can't take instructions.
+    this.unsubscribeRuns =
+      options.runs?.subscribe((event) => {
+        for (const session of this.sessions.values()) {
+          if (session.token === event.run) this.setToken(session, event.run);
+        }
+      }) ?? (() => {});
   }
 
   stop(): void {
     this.cancelSweep();
     this.unsubscribe();
+    this.unsubscribeRuns();
     for (const session of this.sessions.values()) this.releaseAll(session, '');
   }
 
   /** Handle one hook POST. Resolves with the HTTP reply for Claude Code. */
-  handle(body: unknown): Promise<PostReply> {
+  handle(body: unknown, headers: IncomingHttpHeaders = {}): Promise<PostReply> {
     const event = obj(body);
     if (typeof event.session_id !== 'string' || !event.session_id || typeof event.hook_event_name !== 'string') {
       return Promise.resolve({ status: 400, body: { error: 'not a hook event' } });
     }
-    return this.dispatch(event as Event);
+    const run = headers[RUN_HEADER];
+    return this.dispatch(event as Event, typeof run === 'string' && /^[0-9a-f-]{36}$/.test(run) ? run : null);
+  }
+
+  /** The run token from a session's hooks. While that run's launcher is connected the device can type into it. */
+  private setToken(session: Session, token: string | null): void {
+    session.token = token;
+    const managed = token !== null && (this.options.runs?.has(token) ?? false);
+    if (this.hub.get(session.id)?.reply !== managed) {
+      this.change(session.id, (s) => {
+        s.reply = managed;
+      });
+    }
+  }
+
+  private reply(id: string, text: string): void {
+    const token = this.sessions.get(id)?.token;
+    // Claude Code reports the prompt through UserPromptSubmit, which logs it.
+    if (token) this.options.runs?.type(token, text);
   }
 
   private now(): number {
@@ -123,7 +157,7 @@ export class ClaudeSource {
     s.log.length = Math.min(s.log.length, LIMITS.log);
   }
 
-  private session(event: Event): Session {
+  private session(event: Event, run: string | null): Session {
     const id = event.session_id.slice(0, LIMITS.id);
     let session = this.sessions.get(id);
     const cwd = str(event.cwd);
@@ -136,6 +170,7 @@ export class ClaudeSource {
         lastEvent: this.now(),
         held: [],
         ended: false,
+        token: null,
       };
       this.sessions.set(id, session);
       const now = this.now();
@@ -148,7 +183,7 @@ export class ClaudeSource {
           state: 'idle',
           since: now,
           started: now,
-          reply: false, // plain terminal sessions: no way to type into them yet
+          reply: false, // until a managed run claims it
           n: { read: 0, edit: 0, new: 0, cmd: 0, add: 0, del: 0 },
           log: [],
           files: [],
@@ -157,11 +192,13 @@ export class ClaudeSource {
         {
           decide: (req, allow) => this.decide(id, req, allow),
           answer: (req, option) => this.answer(id, req, option),
+          reply: (text) => this.reply(id, text),
         },
       );
       this.options.log(`claude session ${id.slice(0, 8)} in ${cwd ?? '?'}`);
     }
     session.lastEvent = this.now();
+    if (run !== session.token) this.setToken(session, run);
     // What hooks don't say: model, branch and the latest thing Claude wrote.
     const state = session.tail?.update();
     this.change(id, (s) => {
@@ -176,8 +213,8 @@ export class ClaudeSource {
     return session;
   }
 
-  private async dispatch(event: Event): Promise<PostReply> {
-    const session = this.session(event);
+  private async dispatch(event: Event, run: string | null): Promise<PostReply> {
+    const session = this.session(event, run);
     const id = session.id;
     const cwd = str(event.cwd);
     const tool = str(event.tool_name) ?? '';
