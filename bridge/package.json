@@ -1,0 +1,24 @@
+{
+  "name": "codetalky-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PC-side service that connects CodeTalky devices to coding agents",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "demo": "node src/main.ts --fake",
+    "test": "node --test \"test/*.test.ts\"",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/ws": "^8.18.0",
+    "typescript": "^5.8.0"
+  }
+}

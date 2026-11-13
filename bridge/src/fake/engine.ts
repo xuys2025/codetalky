@@ -1,0 +1,279 @@
+// A scripted stand-in for a real coding agent. It walks through a list of steps,
+// writes what it "does" into the hub, and stops to wait whenever a real agent would:
+// for permission, for an answer, or for the next instruction.
+
+import type { Clock } from '../clock.ts';
+import type { Hub } from '../hub.ts';
+import { LIMITS, type ApproveAsk, type Hunk, type LogEntry, type Para, type SessionSnapshot } from '../protocol.ts';
+
+type AskBody = Pick<ApproveAsk, 'verb' | 'target' | 'add' | 'del' | 'line' | 'lines' | 'why' | 'risky'>;
+
+export type Step =
+  /** A tool call that takes `takes` seconds. For Edit and Write, `target` is the file path. */
+  | {
+      do: 'tool';
+      verb: string;
+      target: string;
+      takes: number;
+      add?: number;
+      del?: number;
+      res?: string;
+      bad?: boolean;
+      hunk?: Hunk;
+    }
+  | { do: 'say'; text: string }
+  | { do: 'todo'; done: number }
+  /** `ago` backdates the wait, for sessions that are already waiting when the demo opens. */
+  | { do: 'approve'; ask: AskBody; allow: Step[]; deny: Step[]; ago?: number }
+  | { do: 'question'; text: string; note?: string; options: { label: string; desc?: string; then: Step[] }[]; ago?: number }
+  | { do: 'done'; report: Para[]; ago?: number }
+  /** Stops until the user replies, or by itself after `retryAfter` seconds. */
+  | { do: 'error'; text: string; retryAfter?: number; ago?: number };
+
+export interface FakeScript {
+  /** The session as it looks when the demo opens; t0 is "now" in Unix seconds. */
+  initial(t0: number): SessionSnapshot;
+  steps: Step[];
+  /** What it does when told something after the script has run out. */
+  followUp(text: string): Step[];
+}
+
+const APPROVE_TIMEOUT_S = 600;
+const COUNTED: Record<string, 'read' | 'edit' | 'new' | 'cmd'> = {
+  Read: 'read',
+  Grep: 'read',
+  Glob: 'read',
+  Edit: 'edit',
+  Write: 'new',
+  Bash: 'cmd',
+};
+
+const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1);
+
+export class FakeAgent {
+  private readonly hub: Hub;
+  private readonly clock: Clock;
+  private readonly script: FakeScript;
+  private readonly id: string;
+  private queue: Step[];
+  /** The step the agent is stopped on, if any. */
+  private blocked: Extract<Step, { do: 'approve' | 'question' | 'done' | 'error' }> | null = null;
+  private cancelTimer: (() => void) | null = null;
+  private nextReq = 1;
+
+  constructor(hub: Hub, clock: Clock, script: FakeScript) {
+    this.hub = hub;
+    this.clock = clock;
+    this.script = script;
+    this.queue = [...script.steps];
+    const snapshot = script.initial(hub.nowSeconds());
+    this.id = snapshot.id;
+    hub.put(snapshot, {
+      decide: (req, allow) => this.decide(req, allow),
+      answer: (req, option) => this.answer(req, option),
+      reply: (text) => this.reply(text),
+    });
+    this.next();
+  }
+
+  stop(): void {
+    this.cancelTimer?.();
+    this.cancelTimer = null;
+  }
+
+  private change(fn: (s: SessionSnapshot) => void): void {
+    this.hub.update(this.id, fn);
+  }
+
+  private log(s: SessionSnapshot, entry: Omit<LogEntry, 'at'>): void {
+    s.log.unshift({ at: this.hub.nowSeconds(), ...entry });
+    s.log.length = Math.min(s.log.length, LIMITS.log);
+  }
+
+  private wait(seconds: number, fn: () => void): void {
+    this.cancelTimer?.();
+    this.cancelTimer = this.clock.after(seconds * 1000, () => {
+      this.cancelTimer = null;
+      fn();
+    });
+  }
+
+  private resume(s: SessionSnapshot): void {
+    s.state = 'running';
+    s.since = this.hub.nowSeconds();
+    delete s.ask;
+    delete s.err;
+    this.blocked = null;
+  }
+
+  private next(): void {
+    const step = this.queue.shift();
+    if (step === undefined) {
+      // Ran out of script without a final report: sit idle until told something.
+      this.blocked = { do: 'done', report: [] };
+      this.change((s) => {
+        s.state = 'idle';
+        s.since = this.hub.nowSeconds();
+      });
+      return;
+    }
+    const now = this.hub.nowSeconds();
+    switch (step.do) {
+      case 'tool':
+        this.change((s) => {
+          s.state = 'running';
+          s.now = { verb: step.verb, target: step.target, add: step.add, del: step.del };
+        });
+        this.wait(step.takes, () => {
+          this.change((s) => this.finishTool(s, step));
+          this.next();
+        });
+        break;
+      case 'say':
+        this.change((s) => {
+          s.say = step.text;
+          this.log(s, { verb: '说', target: step.text });
+        });
+        this.wait(2, () => this.next());
+        break;
+      case 'todo':
+        this.change((s) => {
+          if (s.todos) s.todos.done = Math.min(step.done, s.todos.items.length);
+        });
+        this.next();
+        break;
+      case 'approve': {
+        const since = now - (step.ago ?? 0);
+        const req = `r${this.nextReq++}`;
+        this.blocked = step;
+        this.change((s) => {
+          s.state = 'approve';
+          s.since = since;
+          s.now = { verb: step.ask.verb, target: step.ask.target, add: step.ask.add, del: step.ask.del };
+          s.ask = { kind: 'approve', req, ...step.ask, until: since + APPROVE_TIMEOUT_S };
+        });
+        // A real hook gives up after its timeout and the agent asks in the terminal instead.
+        this.wait(since + APPROVE_TIMEOUT_S - now, () => {
+          this.queue.unshift({ do: 'say', text: '没等到批准，这一步先跳过。' }, ...step.deny);
+          this.change((s) => this.resume(s));
+          this.next();
+        });
+        break;
+      }
+      case 'question': {
+        const req = `r${this.nextReq++}`;
+        this.blocked = step;
+        this.change((s) => {
+          s.state = 'question';
+          s.since = now - (step.ago ?? 0);
+          s.ask = {
+            kind: 'question',
+            req,
+            text: step.text,
+            note: step.note,
+            options: step.options.map(({ label, desc }) => ({ label, desc })),
+          };
+        });
+        break;
+      }
+      case 'done':
+        this.blocked = step;
+        this.change((s) => {
+          s.state = 'done';
+          s.since = now - (step.ago ?? 0);
+          s.report = step.report;
+          if (s.todos) s.todos.done = s.todos.items.length;
+        });
+        break;
+      case 'error':
+        this.blocked = step;
+        this.change((s) => {
+          s.state = 'error';
+          s.since = now - (step.ago ?? 0);
+          s.err = step.text;
+        });
+        if (step.retryAfter !== undefined) {
+          this.wait(step.retryAfter, () => {
+            this.change((s) => this.resume(s));
+            this.next();
+          });
+        }
+        break;
+    }
+  }
+
+  private finishTool(s: SessionSnapshot, step: Extract<Step, { do: 'tool' }>): void {
+    const isFile = step.verb === 'Edit' || step.verb === 'Write' || step.verb === 'Read';
+    this.log(s, {
+      verb: step.verb,
+      target: isFile ? baseName(step.target) : step.target,
+      add: step.add,
+      del: step.del,
+      res: step.res,
+      bad: step.bad,
+    });
+    const counter = COUNTED[step.verb];
+    if (counter) s.n[counter] += 1;
+    s.n.add += step.add ?? 0;
+    s.n.del += step.del ?? 0;
+    if (step.verb === 'Edit' || step.verb === 'Write') {
+      let file = s.files.find((f) => f.path === step.target);
+      if (!file) {
+        file = { st: step.verb === 'Write' ? 'A' : 'M', path: step.target, add: 0, del: 0 };
+        s.files.unshift(file);
+      }
+      file.add += step.add ?? 0;
+      file.del += step.del ?? 0;
+      s.hunks.total += 1;
+      if (step.hunk) s.hunks.list.unshift(step.hunk);
+    }
+    if (s.ctx !== undefined) s.ctx = Math.min(95, s.ctx + 1);
+  }
+
+  private decide(_req: string, allow: boolean): void {
+    const step = this.blocked;
+    if (step?.do !== 'approve') return;
+    this.cancelTimer?.();
+    this.cancelTimer = null;
+    this.queue.unshift(...(allow ? step.allow : step.deny));
+    this.change((s) => {
+      if (!allow) this.log(s, { verb: step.ask.verb, target: step.ask.target, res: '已拒绝', bad: true });
+      this.resume(s);
+    });
+    this.next();
+  }
+
+  private answer(_req: string, option: number): void {
+    const step = this.blocked;
+    if (step?.do !== 'question') return;
+    const chosen = step.options[option];
+    if (!chosen) return;
+    this.queue.unshift(...chosen.then);
+    this.change((s) => {
+      this.log(s, { verb: '答', target: chosen.label });
+      this.resume(s);
+    });
+    this.next();
+  }
+
+  private reply(text: string): void {
+    const step = this.blocked;
+    if (step?.do === 'done' || step?.do === 'error') {
+      // A new turn starts.
+      this.cancelTimer?.();
+      this.cancelTimer = null;
+      if (this.queue.length === 0) this.queue = this.script.followUp(text);
+      this.change((s) => {
+        this.log(s, { verb: '你', target: text });
+        this.resume(s);
+        s.started = s.since;
+        delete s.report;
+      });
+      this.next();
+      return;
+    }
+    // Busy or waiting on something else: it will get to it after the current step.
+    this.queue.unshift({ do: 'say', text: `收到，手上这一步做完就处理：${text}` });
+    this.change((s) => this.log(s, { verb: '你', target: text }));
+  }
+}
