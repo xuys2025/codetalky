@@ -55,7 +55,7 @@
   "files": [ { "st": "M", "path": "display/epd_driver.c", "add": 54, "del": 28 } ],
   "hunks": {                // 改动片段，total 是总数，list 最多 6 段
     "total": 4,
-    "list": [ { "file": "epd_driver.c", "line": 214, "add": 5, "del": 1,
+    "list": [ { "file": "display/epd_driver.c", "line": 214, "add": 5, "del": 1,
                 "lines": [" static int partial_n;", "-  epd_refresh(PARTIAL);", "+  if (++partial_n >= 8) {"] } ]
   },
   "ask": { /* state 是 approve 或 question 时才有，见下 */ },

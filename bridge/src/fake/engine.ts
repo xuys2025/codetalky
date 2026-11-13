@@ -30,6 +30,8 @@ export type Step =
   /** Stops until the user replies, or by itself after `retryAfter` seconds. */
   | { do: 'error'; text: string; retryAfter?: number; ago?: number };
 
+export type ToolStep = Extract<Step, { do: 'tool' }>;
+
 export interface FakeScript {
   /** The session as it looks when the demo opens; t0 is "now" in Unix seconds. */
   initial(t0: number): SessionSnapshot;
@@ -48,7 +50,47 @@ const COUNTED: Record<string, 'read' | 'edit' | 'new' | 'cmd'> = {
   Bash: 'cmd',
 };
 
-const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1);
+export const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1);
+
+function addLog(s: SessionSnapshot, entry: LogEntry): void {
+  s.log.unshift(entry);
+  s.log.length = Math.min(s.log.length, LIMITS.log);
+}
+
+/** Write a finished tool call into a snapshot: log, counters, files, hunks. */
+export function recordTool(s: SessionSnapshot, at: number, step: ToolStep): void {
+  const isFile = step.verb === 'Edit' || step.verb === 'Write' || step.verb === 'Read';
+  addLog(s, {
+    at,
+    verb: step.verb,
+    target: isFile ? baseName(step.target) : step.target,
+    add: step.add,
+    del: step.del,
+    res: step.res,
+    bad: step.bad,
+  });
+  const counter = COUNTED[step.verb];
+  if (counter) s.n[counter] += 1;
+  s.n.add += step.add ?? 0;
+  s.n.del += step.del ?? 0;
+  if (step.verb === 'Edit' || step.verb === 'Write') {
+    let file = s.files.find((f) => f.path === step.target);
+    if (!file) {
+      file = { st: step.verb === 'Write' ? 'A' : 'M', path: step.target, add: 0, del: 0 };
+      s.files.unshift(file);
+    }
+    file.add += step.add ?? 0;
+    file.del += step.del ?? 0;
+    s.hunks.total += 1;
+    if (step.hunk) s.hunks.list.unshift(step.hunk);
+  }
+}
+
+/** Write something the agent said into a snapshot. */
+export function recordSay(s: SessionSnapshot, at: number, text: string): void {
+  s.say = text;
+  addLog(s, { at, verb: '说', target: text });
+}
 
 export class FakeAgent {
   private readonly hub: Hub;
@@ -86,8 +128,7 @@ export class FakeAgent {
   }
 
   private log(s: SessionSnapshot, entry: Omit<LogEntry, 'at'>): void {
-    s.log.unshift({ at: this.hub.nowSeconds(), ...entry });
-    s.log.length = Math.min(s.log.length, LIMITS.log);
+    addLog(s, { at: this.hub.nowSeconds(), ...entry });
   }
 
   private wait(seconds: number, fn: () => void): void {
@@ -130,10 +171,7 @@ export class FakeAgent {
         });
         break;
       case 'say':
-        this.change((s) => {
-          s.say = step.text;
-          this.log(s, { verb: '说', target: step.text });
-        });
+        this.change((s) => recordSay(s, now, step.text));
         this.wait(2, () => this.next());
         break;
       case 'todo':
@@ -202,31 +240,8 @@ export class FakeAgent {
     }
   }
 
-  private finishTool(s: SessionSnapshot, step: Extract<Step, { do: 'tool' }>): void {
-    const isFile = step.verb === 'Edit' || step.verb === 'Write' || step.verb === 'Read';
-    this.log(s, {
-      verb: step.verb,
-      target: isFile ? baseName(step.target) : step.target,
-      add: step.add,
-      del: step.del,
-      res: step.res,
-      bad: step.bad,
-    });
-    const counter = COUNTED[step.verb];
-    if (counter) s.n[counter] += 1;
-    s.n.add += step.add ?? 0;
-    s.n.del += step.del ?? 0;
-    if (step.verb === 'Edit' || step.verb === 'Write') {
-      let file = s.files.find((f) => f.path === step.target);
-      if (!file) {
-        file = { st: step.verb === 'Write' ? 'A' : 'M', path: step.target, add: 0, del: 0 };
-        s.files.unshift(file);
-      }
-      file.add += step.add ?? 0;
-      file.del += step.del ?? 0;
-      s.hunks.total += 1;
-      if (step.hunk) s.hunks.list.unshift(step.hunk);
-    }
+  private finishTool(s: SessionSnapshot, step: ToolStep): void {
+    recordTool(s, this.hub.nowSeconds(), step);
     if (s.ctx !== undefined) s.ctx = Math.min(95, s.ctx + 1);
   }
 
