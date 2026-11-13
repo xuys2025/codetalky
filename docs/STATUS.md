@@ -237,7 +237,7 @@ node src/main.ts hooks --remove ~/.claude/settings.json  # 不用了就撤掉
 
 1. （11-13 通过）托管终端 + 真 Claude Code。
 2. （11-13 通过）交互式会话里的批准：设备批准、终端里答、谁都不答三种都测了。
-3. （11-13 通过）Codex：你合并了钩子并在 Codex 里信任了它们，我用 `codetalky codex -m gpt-6-luna -c model_reasoning_effort=low -s read-only -a on-request` 跑了四轮，前三轮各发现问题、改完再跑，第四轮全部通过（见上面第 10 项）。钩子还留在 `~/.codex/hooks.json` 里，撤掉用 `node src/main.ts hooks --codex --remove ~/.codex/hooks.json`。桌面版还没测。
+3. （11-13 通过）Codex：你合并了钩子并在 Codex 里信任了它们，我用 `codetalky codex -m gpt-6-luna -c model_reasoning_effort=low -s read-only -a on-request` 跑了四轮，前三轮各发现问题、改完再跑，第四轮全部通过（见上面第 10 项）。测完你撤掉了钩子（`~/.codex/hooks.json` 现在是 `{}`），要再用就重新 `--merge`。桌面版还没测。
 4. 多台电脑的真实场景：要第二台电脑，需要你来配合。
 
 ## 常用命令
