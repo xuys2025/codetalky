@@ -157,7 +157,7 @@ node src/main.ts hooks --remove ~/.claude/settings.json  # 不用了就撤掉
 安全：
 
 - 钩子入口只接受本机发来、并且不带 Origin 头的请求，网页伪造不了。
-- 设备从别的机器连进来一律拒绝，等配对口令做好再放开；早期接真机调试可以加 `--insecure-lan`（会打印警告）。
+- 设备从别的机器连进来要先配对（见下面“配对”）；早期接真机调试可以加 `--insecure-lan` 跳过（会打印警告）。
 
 还没做的：
 
@@ -200,7 +200,7 @@ node src/main.ts hooks --remove ~/.claude/settings.json  # 不用了就撤掉
    - 语音确认里的文字是写死的（第 3 阶段接豆包后才有真的）。
 7. （已做）接 Claude Code 的钩子，跑通真实的批准闭环（第 2 阶段）。
 8. （已做）在 WSL 里装 ESP-IDF v5.5.4，官方固件原样编译通过（`Metalio-E-Ink4.bin`，4.16 MB）。脚本 `tools/esp/install-idf.sh` 可重跑：Python 3.12 用 uv 装（系统的 3.14 太新）；ESP-IDF 和工具链都从乐鑫镜像 dl.espressif.com 下载，不用代理；openocd 缺的 libusb 不用 sudo，下载 Ubuntu 的包解压到 `~/esp/libusb`；官方资源打包要的 qoi-conv 预先装好。官方仓库在 WSL 里重新克隆到 `~/work/metalio`，符号链接才是真的。
-9. （已做，11-13 真 Claude Code 实测通过，见上面第 7 项的实测记录）托管终端：`codetalky claude` 在伪终端里启动 Claude Code（node-pty 的预编译版 `@lydell/node-pty`，Windows 上走 ConPTY），你照常用。启动时生成一个运行标记放进环境变量 `CODETALKY_RUN`，钩子把它放在请求头里带回来，电脑端服务就知道这个会话是托管的，设备上的“发指令”“回复”随之打开。设备发来的指令合成一行，先输入文字，停 150 毫秒再按回车（免得被当成粘贴）。启动器退出后“发指令”自动关掉；电脑端服务重启后启动器 3 秒内自动重连。用假的命令行程序测过整条链路，真 Claude Code 还没测。
+9. （已做，11-13 真 Claude Code 实测通过，见上面第 7 项的实测记录）托管终端：`codetalky claude` 在伪终端里启动 Claude Code（node-pty 的预编译版 `@lydell/node-pty`，Windows 上走 ConPTY），你照常用。启动时生成一个运行标记放进环境变量 `CODETALKY_RUN`，钩子把它放在请求头里带回来，电脑端服务就知道这个会话是托管的，设备上的“发指令”“回复”随之打开。设备发来的指令合成一行，先输入文字，停 150 毫秒再按回车（免得被当成粘贴）。启动器退出后“发指令”自动关掉；电脑端服务重启后启动器 3 秒内自动重连。用假的命令行程序测过整条链路，11-13 又用真 Claude Code 测过。
 10. （已做，11-13 真 Codex 实测通过，见下面）接 Codex。本机的 Codex CLI 11-13 从 0.136 升到了 0.169（当时的最新版），用 ChatGPT 账号登录，`codex doctor` 检查全部正常；钩子功能是稳定版，默认开着。和 Claude Code 的区别：
     - 钩子只能是命令，没有 HTTP 型，所以用一个转发脚本 `bridge/hooks/hook.mjs` 把事件交给电脑端服务（`/hooks/codex`），再把答复打印回去；电脑端没开时打印 `{}`，Codex 照常问你。脚本用 `node:http` 而不是 `fetch`，因为 `fetch` 等响应头最多 300 秒，批准要等更久。
     - 新钩子要先信任：合并配置后启动 codex，输入 `/hooks` 信任一次。有个每次跳过信任的启动参数（`--dangerously-bypass-hook-trust`），会连别的钩子一起放行，不用。
