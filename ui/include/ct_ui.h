@@ -6,6 +6,7 @@
 #define CT_UI_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,6 +29,12 @@ void ct_ui_init(void);
 
 /* A key went down or up. */
 void ct_ui_on_key(ct_key_t key, bool down);
+
+/* The connection to the bridge came up or went down. */
+void ct_ui_on_link(bool up);
+
+/* One text frame from the bridge. Call from the UI thread, not from inside LVGL. */
+void ct_ui_on_message(const char *json, size_t len);
 
 #ifdef __cplusplus
 }

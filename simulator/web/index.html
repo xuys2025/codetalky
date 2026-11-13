@@ -54,11 +54,13 @@
     </label>
     <label><input type="checkbox" id="grey" checked> 停下后叠加灰度</label>
     <dl>
+      <dt>电脑</dt><dd id="st-link">—</dd>
       <dt>上次刷新</dt><dd id="st-mode">—</dd>
       <dt>耗时</dt><dd id="st-ms">—</dd>
       <dt>距上次全刷</dt><dd id="st-count">0 次局刷</dd>
       <dt>排队</dt><dd id="st-queue">0</dd>
     </dl>
+    <p class="muted">数据来自电脑端服务：在 bridge 目录运行 <code>npm run demo</code>，再打开它给出的地址。</p>
     <p class="muted">刷新耗时和残影是占位参数，真机到货后按实测校准。屏幕按下后不会立刻变化，这是在模拟墨水屏的刷新延迟。</p>
     <p class="muted" id="st-error"></p>
   </div>

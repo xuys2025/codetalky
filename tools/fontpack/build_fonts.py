@@ -43,7 +43,7 @@ def scan_sources(root, dirs):
     found = set()
     for d in dirs:
         for path in (root / d).rglob("*"):
-            if path.suffix in {".c", ".h"} and "fonts" not in path.parts:
+            if path.suffix in {".c", ".h", ".ts"} and "fonts" not in path.parts and "node_modules" not in path.parts:
                 found.update(ch for ch in path.read_text(encoding="utf-8", errors="ignore") if ord(ch) > 0x7F)
     return found
 

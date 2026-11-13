@@ -1,41 +1,109 @@
-// Render the simulator headlessly and save the screen as a 1-bit PNG.
-// No browser needed, so it doubles as a visual check in scripts.
+// Render the simulator headlessly and save the screen as a 1-bit PNG. No browser
+// needed, so it doubles as a visual check in scripts.
 //
-//   node simulator/tools/snapshot.mjs out.png [--tap x,y] [--key N] [--ms 500]
+// The bridge runs in this process with the fake agent's six demo sessions. The
+// bridge and the UI share one manual clock that starts at the moment the mockups
+// show (2026-11-14 14:32, UTC+8), so every run gives the same pixels.
 //
-// Actions run in the order given; --ms advances the clock (default 300 after each action).
+//   node simulator/tools/snapshot.mjs out.png [actions...]
+//
+//   --tap x,y    touch and release
+//   --hold x,y   touch for a second, then release (long press)
+//   --key N      press and release a key (see ct_key_t in ui/include/ct_ui.h)
+//   --ms N       let N milliseconds pass
+//   --offline    don't connect to the bridge (must come first)
+//   --verbose    print the frames sent by the device
+//
+// Actions run in the order given; 300 ms pass after each one.
 import { createRequire } from 'node:module';
 import { writeFileSync } from 'node:fs';
 import { deflateSync, crc32 } from 'node:zlib';
+
+import { ManualClock } from '../../bridge/src/clock.ts';
+import { FakeAgent } from '../../bridge/src/fake/engine.ts';
+import { DEMO_T0, demoScripts } from '../../bridge/src/fake/scenario.ts';
+import { Hub } from '../../bridge/src/hub.ts';
+import { DEFAULT_QUICK, DeviceLink } from '../../bridge/src/link.ts';
 
 const require = createRequire(import.meta.url);
 const createSim = require('../web/gen/codetalky_sim.js');
 
 const [outPath, ...args] = process.argv.slice(2);
-if (!outPath) {
-  console.error('usage: node snapshot.mjs out.png [--tap x,y] [--key N] [--ms 500]');
+if (!outPath || outPath.startsWith('--')) {
+  console.error('usage: node snapshot.mjs out.png [--tap x,y] [--hold x,y] [--key N] [--ms N] [--offline] [--verbose]');
   process.exit(2);
 }
+const offline = args.includes('--offline');
+const verbose = args.includes('--verbose');
+const actions = args.filter((a) => a !== '--offline' && a !== '--verbose');
 
+// ---- bridge, in process ----
+const clock = new ManualClock(DEMO_T0 * 1000);
+const hub = new Hub(clock);
+for (const script of demoScripts()) new FakeAgent(hub, clock, script);
+const toDevice = [];
+const toBridge = [];
+let link = null;
+
+// ---- device ----
 const flushes = [];
 const sim = await createSim({
   onFlush: (x1, y1, x2, y2, last, mode) => flushes.push({ x1, y1, x2, y2, last, mode }),
   onVibrate: (ms) => console.log(`vibrate ${ms} ms`),
+  // Called from inside the UI; queue it and deliver between ticks so nothing re-enters LVGL.
+  onNetSend: (text) => {
+    if (!link) return false;
+    if (verbose) console.log(`device: ${text}`);
+    toBridge.push(text);
+    return true;
+  },
 });
 
+function toUi(text) {
+  const size = sim.lengthBytesUTF8(text) + 1;
+  const ptr = sim._malloc(size);
+  sim.stringToUTF8(text, ptr, size);
+  sim._sim_net_rx(ptr, size - 1);
+  sim._free(ptr);
+}
+
+function deliver() {
+  while (toBridge.length > 0 || toDevice.length > 0) {
+    for (const text of toBridge.splice(0)) {
+      if (link && !link.receive(text)) console.error('the bridge dropped the device');
+    }
+    for (const text of toDevice.splice(0)) toUi(text);
+  }
+}
+
+const STEP = 33;
 const run = (ms) => {
-  for (let t = 0; t < ms; t += 33) sim._sim_tick(33);
+  for (let t = 0; t < ms; t += STEP) {
+    clock.advance(STEP);
+    deliver();
+    sim._sim_tick(STEP);
+    deliver();
+  }
 };
 
 sim._sim_init();
-run(300);
+if (!offline) {
+  link = new DeviceLink(hub, clock, (text) => toDevice.push(text), {
+    quick: DEFAULT_QUICK,
+    tzMinutes: 480,
+    flushMs: 150,
+  });
+  sim._sim_net_link(1);
+}
+run(1000);
 
-for (let i = 0; i < args.length; i += 2) {
-  const [flag, value] = [args[i], args[i + 1]];
-  if (flag === '--tap') {
-    const [x, y] = value.split(',').map(Number);
+const point = (value) => value.split(',').map(Number);
+for (let i = 0; i < actions.length; i += 2) {
+  const [flag, value] = [actions[i], actions[i + 1]];
+  if (flag === '--tap' || flag === '--hold') {
+    const [x, y] = point(value);
     sim._sim_pointer(x, y, 1);
-    run(100);
+    run(flag === '--hold' ? 1000 : 100);
     sim._sim_pointer(x, y, 0);
     run(300);
   } else if (flag === '--key') {
@@ -93,4 +161,5 @@ writeFileSync(outPath, Buffer.concat([
   chunk('IEND', Buffer.alloc(0)),
 ]));
 
-console.log(`${outPath}: ${w}x${h}, ${(black / (w * h) * 100).toFixed(1)}% black, ${flushes.length} flushes`);
+const refreshes = flushes.filter((f) => f.last).length;
+console.log(`${outPath}: ${w}x${h}, ${(black / (w * h) * 100).toFixed(1)}% black, ${refreshes} refreshes`);

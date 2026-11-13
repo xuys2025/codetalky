@@ -1,15 +1,23 @@
 /*
- * What the UI shows about agent sessions. For now the data is a built-in demo set;
- * later the bridge fills the same structures over the network.
+ * What the device knows about agent sessions, as last sent by the bridge
+ * (see docs/PROTOCOL.md). Each session is replaced whole when a new snapshot
+ * arrives, so never keep a pointer into one across calls into the UI loop:
+ * look sessions up by id each time.
  */
 #ifndef CT_MODEL_H
 #define CT_MODEL_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#define CT_MAX_SESSIONS 16
+#define CT_ID_MAX 48  /* bytes with the terminator; the bridge keeps ids to 47 */
+#define CT_REQ_MAX 64 /* bytes with the terminator */
+#define CT_MAX_QUICK 8
 
 typedef enum {
     CT_STATE_IDLE = 0,
@@ -22,84 +30,124 @@ typedef enum {
 
 /* One step the agent took. */
 typedef struct {
-    const char *time;   /* "14:31" */
-    const char *verb;   /* tool name: Edit, Bash, Read ... */
-    const char *target; /* file or command */
-    const char *result; /* "+18 −7", "通过", "88 行" */
-    bool bad;           /* result is a failure */
-} ct_activity_t;
+    int64_t at; /* Unix seconds */
+    const char *verb;
+    const char *target;
+    const char *res; /* short result when there is no line count, or NULL */
+    int add, del;
+    bool has_stat; /* add/del were given */
+    bool bad;
+} ct_log_t;
 
 typedef struct {
-    char status;      /* 'M' modified, 'A' added, 'D' deleted */
+    char st; /* 'M', 'A' or 'D' */
     const char *path;
-    const char *stat; /* "+54 −28" */
+    int add, del;
 } ct_file_t;
 
 typedef struct {
-    char kind; /* ' ' context, '+' added, '-' removed */
-    const char *text;
-} ct_diff_line_t;
+    const char *file;
+    int line, add, del;
+    const char *const *lines; /* each starts with ' ', '+' or '-' */
+    int line_count;
+} ct_hunk_t;
 
 typedef struct {
     const char *label;
-    const char *desc;
+    const char *desc; /* or NULL */
 } ct_option_t;
 
-/* One paragraph of an agent's final message. */
+/* One paragraph of the agent's final message. */
 typedef struct {
     bool bullet;
     const char *lead; /* bold lead-in, or NULL */
     const char *text;
 } ct_para_t;
 
+typedef enum { CT_ASK_NONE = 0, CT_ASK_APPROVE, CT_ASK_QUESTION } ct_ask_kind_t;
+
 typedef struct {
-    const char *name;  /* project */
-    const char *agent; /* "claude", "codex" */
-    const char *model;
-    const char *branch;
-    ct_state_t state;
+    ct_ask_kind_t kind;
+    const char *req; /* must be sent back with the answer */
 
-    const char *verb;   /* what it is doing or asking for right now */
-    const char *target;
-    const char *stat;   /* total lines changed, "+86 −21", or NULL */
-    const char *counts; /* "读 12 · 改 3" */
-    const char *when;   /* "等了 2 分", "8 分 · 任务 3/5" */
+    /* approve */
+    const char *verb, *target;
+    int add, del;
+    bool has_stat;
+    int line;
+    const char *const *lines;
+    int line_count;
+    const char *why;
+    int64_t until; /* 0 = no deadline */
+    bool risky;    /* approve needs a long press */
 
-    const char *meta_right; /* detail header, right side */
-    const char *thinking;   /* the agent's latest message */
-    const char *summary;    /* "读 21 · 改 4 · 新 1 · 命令 6" */
-    const char *const *todos;
-    int todo_count;
-    int todo_done;
-
-    const ct_activity_t *activity;
-    int activity_count;
-    const ct_file_t *files;
-    int file_count;
-    const char *hunk_title;
-    const char *hunk_stat;
-    const ct_diff_line_t *hunk;
-    int hunk_count;
-    int hunk_total;
-
-    const char *reason; /* why it wants the pending change */
-    const char *expiry;
-
-    const char *question;
-    const char *question_note;
+    /* question */
+    const char *text, *note;
     const ct_option_t *options;
     int option_count;
+} ct_ask_t;
 
+typedef struct {
+    char id[CT_ID_MAX];
+    const char *name, *agent, *model;
+    const char *branch; /* or NULL */
+    ct_state_t state;
+    int64_t since;   /* entered the current state */
+    int64_t started; /* this round of work began */
+    bool reply;      /* the device may send it instructions */
+
+    struct {
+        const char *verb, *target; /* verb is NULL when nothing is going on */
+        int add, del;
+        bool has_stat;
+    } now;
+    const char *say; /* what it said last, or NULL */
+    struct {
+        int read, edit, created, cmd, add, del;
+    } n;
+    int ctx; /* context used, percent; -1 when unknown */
+
+    const char *const *todos;
+    int todo_count, todo_done;
+    const ct_log_t *log; /* newest first */
+    int log_count;
+    const ct_file_t *files;
+    int file_count;
+    const ct_hunk_t *hunks;
+    int hunk_count, hunk_total;
+    ct_ask_t ask;
     const ct_para_t *report;
     int report_count;
+    const char *err; /* or NULL */
+
+    uint32_t rev; /* changes with every new snapshot */
+    bool stale;   /* not re-sent since the bridge last said hello */
+    void *mem;    /* owns everything above */
 } ct_session_t;
 
-int ct_model_session_count(void);
-const ct_session_t *ct_model_session(int index);
+/* Sessions in display order: waiting for you, then errors, finished, running, idle. */
+int ct_model_count(void);
+const ct_session_t *ct_model_at(int index);
+const ct_session_t *ct_model_find(const char *id);
+/* Changes whenever any session is added, replaced or removed. */
+uint32_t ct_model_rev(void);
+
+/* For the protocol layer. ct_model_put takes ownership of s and of s->mem. */
+void ct_model_put(ct_session_t *s);
+void ct_model_remove(const char *id);
+void ct_model_mark_stale(void);
+void ct_model_purge_stale(void);
+void ct_session_free(ct_session_t *s);
 
 /* Replies the user can send with one tap. */
-int ct_model_quick_reply_count(void);
-const char *ct_model_quick_reply(int index);
+int ct_model_quick_count(void);
+const char *ct_model_quick(int index);
+void ct_model_set_quick(const char *const *texts, int count);
+
+/* Wall clock, set from the bridge. ct_model_now() is 0 until then. */
+void ct_model_set_time(int64_t unix_seconds, int tz_minutes);
+int64_t ct_model_now(void);
+int ct_model_tz_minutes(void);
 
 #ifdef __cplusplus
 }

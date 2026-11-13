@@ -8,6 +8,7 @@
 #ifndef CT_HAL_H
 #define CT_HAL_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -26,6 +27,12 @@ void ct_hal_refresh_hint(ct_refresh_t mode);
 
 /* One short haptic pulse. */
 void ct_hal_vibrate(uint16_t ms);
+
+/* Send one text frame (JSON) to the bridge. False if the link is down. */
+bool ct_hal_net_send(const char *json);
+
+/* Battery charge in percent, or -1 if unknown. */
+int ct_hal_battery_percent(void);
 
 #ifdef __cplusplus
 }

@@ -4,29 +4,82 @@
  * Every action can be done by touch; the hardware keys are shortcuts:
  * volume up/down and the PREV/NEXT touch keys turn pages, HOME returns to the
  * session list, BOOT is push-to-talk.
+ *
+ * Screens are rebuilt from the model (what the bridge last sent): with a fast
+ * refresh when you move between screens, and with a partial refresh when the
+ * data on the current screen changes. Sessions are looked up by id every time;
+ * nothing keeps a pointer into a session across updates.
  */
 #include "ct_ui.h"
 
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "ct_hal.h"
 #include "ct_model.h"
+#include "ct_proto.h"
+#include "ct_text.h"
 #include "ct_widgets.h"
 
-#define MAX_SESSIONS 16
 #define LIST_ROWS 6
 #define ACTIVITY_ROWS 12
+#define FILE_ROWS 4
+#define APPROVE_LINES 9
+#define POLL_MS 200
+#define MIN_REDRAW_MS 600  /* e-ink: don't redraw more often than this */
+#define ACK_TIMEOUT_MS 2000
+#define FAST_EVERY 12      /* after this many partial refreshes, a fast one clears ghosting */
+#define LONG_PRESS_MS 600
 
-typedef enum { SCR_LIST, SCR_DETAIL, SCR_APPROVE, SCR_QUESTION, SCR_DONE, SCR_REPLY, SCR_VOICE } screen_id_t;
+typedef enum {
+    SCR_NONE,
+    SCR_LIST,
+    SCR_DETAIL,
+    SCR_APPROVE,
+    SCR_QUESTION,
+    SCR_DONE,
+    SCR_REPLY,
+    SCR_VOICE,
+} screen_id_t;
 
-static screen_id_t s_screen;
+static screen_id_t s_screen = SCR_NONE;
 static screen_id_t s_reply_from = SCR_LIST;
-static int s_sel;       /* selected session */
-static int s_tab;       /* detail tab: 0 overview, 1 activity, 2 changes */
-static int s_page;      /* page within the current list */
-static ct_state_t s_state[MAX_SESSIONS];
-static const char *s_note[MAX_SESSIONS]; /* what the user last did to a session */
+static char s_sel[CT_ID_MAX]; /* the session on screen */
+static char s_req[CT_REQ_MAX]; /* the request shown on the approve or question screen */
+static char s_row_ids[LIST_ROWS][CT_ID_MAX];
+static int s_tab;  /* detail tab: 0 overview, 1 activity, 2 changes */
+static int s_page; /* page within the current list */
+static const char *s_banner; /* one line at the bottom of the list, until you leave it */
+
+static bool s_link;      /* connected to the bridge */
+static bool s_synced;    /* and it has sent every session */
+static bool s_bad_proto; /* the bridge is a different version */
+static bool s_resynced;  /* everything was just re-sent: the next redraw replaces the whole page */
+
+/* An action waiting for its ack. */
+static struct {
+    uint32_t seq;
+    uint32_t sent_at;
+} s_pending;
+
+/* What the current screen was drawn from. When it changes, the screen is redrawn. */
+typedef struct {
+    uint32_t rev;
+    int64_t minute;
+    bool link, synced;
+} draw_key_t;
+static draw_key_t s_drawn;
+static uint32_t s_drawn_at;
+static int s_partials;
+static ct_refresh_t s_next_refresh = CT_REFRESH_FAST;
+
+/* Pending requests already announced with a buzz. */
+static uint32_t s_announced[CT_MAX_SESSIONS];
+static int s_announced_count;
+static uint32_t s_announced_rev;
+
+/* Placeholder until speech recognition exists (phase 3). */
 static const char *s_heard = "把刚才失败的两个测试修好，然后重新跑一遍。";
 
 static void show_list(void);
@@ -37,17 +90,56 @@ static void show_done(void);
 static void show_reply(void);
 static void show_voice(void);
 
-/* ---------- helpers ---------- */
+/* ---------- state ---------- */
 
-static void present(lv_obj_t *screen, screen_id_t id) {
-    lv_obj_t *old = lv_screen_active();
-    s_screen = id;
-    ct_hal_refresh_hint(CT_REFRESH_FAST);
-    lv_screen_load(screen);
-    if (old != NULL && old != screen) {
-        lv_obj_delete_async(old);
-    }
+static const ct_session_t *current(void) {
+    return ct_model_find(s_sel);
 }
+
+static bool is_waiting(ct_state_t state) {
+    return state == CT_STATE_WAIT_APPROVE || state == CT_STATE_WAIT_ANSWER;
+}
+
+static bool wants_approval(const ct_session_t *s) {
+    return s->state == CT_STATE_WAIT_APPROVE && s->ask.kind == CT_ASK_APPROVE;
+}
+
+static bool wants_answer(const ct_session_t *s) {
+    return s->state == CT_STATE_WAIT_ANSWER && s->ask.kind == CT_ASK_QUESTION;
+}
+
+static const char *req_of(const ct_session_t *s) {
+    return s->ask.req != NULL ? s->ask.req : "";
+}
+
+static draw_key_t key_now(void) {
+    draw_key_t k = {0};
+    k.minute = ct_model_now() / 60;
+    k.link = s_link;
+    k.synced = s_synced;
+    if (s_screen == SCR_LIST) {
+        k.rev = ct_model_rev();
+    } else {
+        const ct_session_t *s = current();
+        k.rev = s != NULL ? s->rev : 0;
+    }
+    return k;
+}
+
+static bool key_eq(draw_key_t a, draw_key_t b) {
+    return a.rev == b.rev && a.minute == b.minute && a.link == b.link && a.synced == b.synced;
+}
+
+static bool input_pressed(void) {
+    for (lv_indev_t *i = lv_indev_get_next(NULL); i != NULL; i = lv_indev_get_next(i)) {
+        if (lv_indev_get_state(i) == LV_INDEV_STATE_PRESSED) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* ---------- words ---------- */
 
 static const char *state_text(ct_state_t state) {
     switch (state) {
@@ -60,8 +152,129 @@ static const char *state_text(ct_state_t state) {
     }
 }
 
-static bool is_waiting(ct_state_t state) {
-    return state == CT_STATE_WAIT_APPROVE || state == CT_STATE_WAIT_ANSWER;
+static void fmt_counts(char *buf, size_t size, const ct_session_t *s) {
+    snprintf(buf, size, "读 %d · 改 %d", s->n.read, s->n.edit + s->n.created);
+}
+
+static void fmt_summary(char *buf, size_t size, const ct_session_t *s) {
+    snprintf(buf, size, "读 %d · 改 %d · 新 %d · 命令 %d", s->n.read, s->n.edit, s->n.created, s->n.cmd);
+}
+
+/* prefix + how long ago, or "刚刚" under a minute. */
+static void fmt_ago(char *buf, size_t size, const char *prefix, int64_t since) {
+    const int64_t seconds = ct_model_now() - since;
+    if (seconds < 60) {
+        snprintf(buf, size, "刚刚");
+        return;
+    }
+    char span[24];
+    ct_fmt_span(span, sizeof(span), seconds);
+    snprintf(buf, size, "%s%s", prefix, span);
+}
+
+static void fmt_task(char *buf, size_t size, const ct_session_t *s) {
+    const int current_task = s->todo_done < s->todo_count ? s->todo_done + 1 : s->todo_count;
+    snprintf(buf, size, "任务 %d/%d", current_task, s->todo_count);
+}
+
+static void fmt_took(char *buf, size_t size, const ct_session_t *s) {
+    char span[24];
+    ct_fmt_span(span, sizeof(span), s->since - s->started);
+    snprintf(buf, size, "用时 %s", span);
+}
+
+/* Right side of a list row. */
+static void fmt_when(char *buf, size_t size, const ct_session_t *s) {
+    char a[32], b[24];
+    switch (s->state) {
+    case CT_STATE_WAIT_APPROVE:
+    case CT_STATE_WAIT_ANSWER: fmt_ago(buf, size, "等了 ", s->since); break;
+    case CT_STATE_RUNNING:
+        ct_fmt_span(a, sizeof(a), ct_model_now() - s->started);
+        if (s->todo_count > 0) {
+            fmt_task(b, sizeof(b), s);
+            snprintf(buf, size, "%s · %s", a, b);
+        } else {
+            snprintf(buf, size, "%s", a);
+        }
+        break;
+    case CT_STATE_DONE: fmt_took(buf, size, s); break;
+    case CT_STATE_ERROR: fmt_ago(buf, size, "停了 ", s->since); break;
+    default: fmt_ago(buf, size, "空闲 ", s->since); break;
+    }
+}
+
+/* Right side of the line under a session's title. */
+static void fmt_meta_right(char *buf, size_t size, const ct_session_t *s) {
+    char a[32], b[32];
+    switch (s->state) {
+    case CT_STATE_RUNNING:
+        ct_fmt_span(a, sizeof(a), ct_model_now() - s->started);
+        if (s->ctx >= 0) {
+            snprintf(buf, size, "%s · 上下文 %d%%", a, s->ctx);
+        } else {
+            snprintf(buf, size, "%s", a);
+        }
+        break;
+    case CT_STATE_WAIT_APPROVE:
+    case CT_STATE_WAIT_ANSWER:
+        fmt_ago(b, sizeof(b), "等了 ", s->since);
+        if (s->todo_count > 0) {
+            fmt_task(a, sizeof(a), s);
+            snprintf(buf, size, "%s · %s", a, b);
+        } else {
+            snprintf(buf, size, "%s", b);
+        }
+        break;
+    default: fmt_when(buf, size, s); break;
+    }
+}
+
+static const char *ack_text(ct_ack_t ack) {
+    switch (ack) {
+    case CT_ACK_OK: return NULL;
+    case CT_ACK_GONE: return "会话已经结束，没有生效";
+    case CT_ACK_STALE: return "请求已经变了，这次没生效";
+    case CT_ACK_UNSUPPORTED: return "这个会话不能从设备操作";
+    case CT_ACK_TIMEOUT: return "电脑没回应，不确定是否生效";
+    case CT_ACK_OFFLINE: return "连接断了，不确定是否生效";
+    default: return "电脑没接受这次操作";
+    }
+}
+
+/* ---------- screen plumbing ---------- */
+
+static void present(lv_obj_t *screen, screen_id_t id) {
+    lv_obj_t *old = lv_screen_active();
+    if (id != SCR_LIST) {
+        s_banner = NULL;
+    }
+    s_screen = id;
+    if (s_next_refresh == CT_REFRESH_PARTIAL) {
+        s_partials++;
+    } else {
+        s_partials = 0;
+    }
+    ct_hal_refresh_hint(s_next_refresh);
+    s_next_refresh = CT_REFRESH_FAST;
+    lv_screen_load(screen);
+    if (old != NULL && old != screen) {
+        lv_obj_delete_async(old);
+    }
+    s_drawn = key_now();
+    s_drawn_at = lv_tick_get();
+}
+
+static void status_bar(lv_obj_t *screen) {
+    char clock[8], right[32];
+    ct_fmt_clock(clock, sizeof(clock), ct_model_now());
+    const int battery = ct_hal_battery_percent();
+    if (battery >= 0) {
+        snprintf(right, sizeof(right), "%s · %d%%", clock, battery);
+    } else {
+        snprintf(right, sizeof(right), "%s", clock);
+    }
+    ct_status_bar(screen, s_link ? "codetalky" : "codetalky · 未连接", right);
 }
 
 static void state_chip(lv_obj_t *parent, ct_state_t state) {
@@ -69,97 +282,198 @@ static void state_chip(lv_obj_t *parent, ct_state_t state) {
     ct_chip(parent, state_text(state), is_waiting(state), state == CT_STATE_RUNNING);
 }
 
-static void open_selected(void) {
-    switch (s_state[s_sel]) {
-    case CT_STATE_WAIT_APPROVE: show_approve(); break;
-    case CT_STATE_WAIT_ANSWER: show_question(); break;
-    case CT_STATE_DONE: show_done(); break;
-    default: show_detail(); break;
+static void header(lv_obj_t *screen, const ct_session_t *s, lv_event_cb_t on_back) {
+    status_bar(screen);
+    lv_obj_t *nav = ct_nav(screen, s->name, on_back);
+    state_chip(nav, s->state);
+}
+
+static void agent_meta(lv_obj_t *screen, const ct_session_t *s, const char *right) {
+    char buf[96];
+    snprintf(buf, sizeof(buf), "%s · %s", s->agent, s->model);
+    ct_meta(screen, buf, right);
+}
+
+/* A paragraph cut to max_lines, ending in dots. */
+static lv_obj_t *short_paragraph(lv_obj_t *parent, const lv_font_t *font, const char *text, int max_lines) {
+    lv_obj_t *label = ct_paragraph(parent, font, text);
+    const int32_t line = lv_font_get_line_height(font) + 3;
+    lv_obj_update_layout(label);
+    if (lv_obj_get_height(label) > line * max_lines) {
+        lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_DOTS);
+        lv_obj_set_height(label, line * max_lines - 3);
+    }
+    return label;
+}
+
+static void open_session(const ct_session_t *s) {
+    if (wants_approval(s)) {
+        show_approve();
+    } else if (wants_answer(s)) {
+        show_question();
+    } else if (s->state == CT_STATE_DONE) {
+        show_done();
+    } else {
+        show_detail();
     }
 }
 
-static void resolve(const char *note) {
-    s_state[s_sel] = CT_STATE_RUNNING;
-    s_note[s_sel] = note;
+static void session_gone(void) {
+    s_next_refresh = CT_REFRESH_FAST;
+    s_banner = "这个会话已经结束";
     show_list();
+}
+
+/* ---------- actions ---------- */
+
+static void finish_action(ct_ack_t ack) {
+    s_pending.seq = 0;
+    s_next_refresh = CT_REFRESH_FAST;
+    s_banner = ack_text(ack);
+    show_list();
+}
+
+/* After a tap the screen stays put until the bridge answers (usually within tens of
+ * milliseconds), then goes to the list in one refresh showing the new state. */
+static void await_ack(uint32_t seq) {
+    if (seq == 0) {
+        finish_action(s_link ? CT_ACK_BAD : CT_ACK_OFFLINE);
+        return;
+    }
+    s_pending.seq = seq;
+    s_pending.sent_at = lv_tick_get();
 }
 
 static void on_back_list(lv_event_t *e) { (void)e; show_list(); }
 static void on_back_reply(lv_event_t *e) { (void)e; show_reply(); }
+
 static void on_back_from_reply(lv_event_t *e) {
     (void)e;
-    if (s_reply_from == SCR_DONE) show_done(); else if (s_reply_from == SCR_DETAIL) show_detail(); else show_list();
+    switch (s_reply_from) {
+    case SCR_DONE: show_done(); break;
+    case SCR_DETAIL: show_detail(); break;
+    case SCR_QUESTION: show_question(); break;
+    default: show_list(); break;
+    }
 }
-static void on_open_reply(lv_event_t *e) { (void)e; s_reply_from = s_screen; show_reply(); }
 
-static void header(lv_obj_t *screen, const ct_session_t *s, lv_event_cb_t on_back) {
-    ct_status_bar(screen);
-    lv_obj_t *nav = ct_nav(screen, s->name, on_back);
-    state_chip(nav, s_state[s_sel]);
+static void on_open_reply(lv_event_t *e) {
+    (void)e;
+    s_reply_from = s_screen;
+    show_reply();
 }
 
 /* ---------- session list ---------- */
 
 static void on_row(lv_event_t *e) {
-    s_sel = (int)(intptr_t)lv_event_get_user_data(e);
+    const int slot = (int)(intptr_t)lv_event_get_user_data(e);
+    const ct_session_t *s = ct_model_find(s_row_ids[slot]);
+    if (s == NULL) {
+        return;
+    }
+    snprintf(s_sel, sizeof(s_sel), "%s", s->id);
     s_tab = 0;
     s_page = 0;
-    open_selected();
+    open_session(s);
 }
 
-static void session_row(lv_obj_t *parent, int index) {
-    const ct_session_t *s = ct_model_session(index);
+/* The second line of a row: what the session is doing or wants. */
+static void row_doing(lv_obj_t *row, const ct_session_t *s) {
+    if (wants_approval(s)) {
+        ct_verb(row, s->ask.verb);
+        ct_label_fill(row, M20, s->ask.target);
+    } else if (wants_answer(s)) {
+        ct_verb(row, "问");
+        ct_label_fill(row, F20, s->ask.text);
+    } else if (s->state == CT_STATE_DONE && s->report_count > 0) {
+        ct_label_fill(row, F20, s->report[0].text);
+    } else if (s->state == CT_STATE_ERROR && s->err != NULL) {
+        ct_label_fill(row, F20, s->err);
+    } else if (s->state == CT_STATE_RUNNING && s->now.verb != NULL) {
+        ct_verb(row, s->now.verb);
+        ct_label_fill(row, M20, s->now.target);
+    } else {
+        ct_label_fill(row, F20, s->say != NULL ? s->say : "等你的下一步");
+    }
+}
+
+static void session_row(lv_obj_t *parent, const ct_session_t *s, int slot) {
+    snprintf(s_row_ids[slot], sizeof(s_row_ids[slot]), "%s", s->id);
     lv_obj_t *row = ct_col(parent, CT_PAD, 3);
     lv_obj_set_height(row, 104);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     ct_border(row, 2, LV_BORDER_SIDE_BOTTOM);
 
-    char buf[96];
+    char buf[96], stat[32];
     lv_obj_t *r1 = ct_row(row, 28, 0, 10);
     ct_label(r1, MB20, s->name);
     snprintf(buf, sizeof(buf), "%s · %s", s->agent, s->model);
     ct_label_fill(r1, M18, buf);
-    state_chip(r1, s_state[index]);
+    state_chip(r1, s->state);
 
     lv_obj_t *r2 = ct_row(row, 28, 0, 8);
-    if (s_note[index] != NULL) {
-        ct_label_fill(r2, F20, s_note[index]);
-    } else {
-        ct_verb(r2, s->verb);
-        ct_label_fill(r2, M20, s->target);
-    }
+    row_doing(r2, s);
     ct_label(r2, MB24, "›");
 
     lv_obj_t *r3 = ct_row(row, 24, 0, 8);
-    if (s->stat != NULL) {
-        snprintf(buf, sizeof(buf), "%s · %s", s->counts, s->stat);
-    } else {
-        snprintf(buf, sizeof(buf), "%s", s->counts);
+    fmt_counts(buf, sizeof(buf), s);
+    ct_fmt_stat(stat, sizeof(stat), s->n.add, s->n.del);
+    if (stat[0] != '\0') {
+        const size_t len = strlen(buf);
+        snprintf(buf + len, sizeof(buf) - len, " · %s", stat);
     }
     ct_label_fill(r3, M18, buf);
-    ct_label(r3, M18, s->when);
+    fmt_when(buf, sizeof(buf), s);
+    ct_label(r3, M18, buf);
 
-    ct_tappable(row, on_row, (void *)(intptr_t)index);
+    ct_tappable(row, on_row, (void *)(intptr_t)slot);
 }
 
-static void on_list_prev(lv_event_t *e) { (void)e; if (s_page > 0) { s_page--; show_list(); } }
+static int list_pages(void) {
+    const int pages = (ct_model_count() + LIST_ROWS - 1) / LIST_ROWS;
+    return pages > 0 ? pages : 1;
+}
+
+static void on_list_prev(lv_event_t *e) {
+    (void)e;
+    if (s_page > 0) {
+        s_page--;
+        show_list();
+    }
+}
+
 static void on_list_next(lv_event_t *e) {
     (void)e;
-    if ((s_page + 1) * LIST_ROWS < ct_model_session_count()) { s_page++; show_list(); }
+    if (s_page + 1 < list_pages()) {
+        s_page++;
+        show_list();
+    }
+}
+
+static void empty_state(lv_obj_t *content, const char *title, const char *hint) {
+    lv_obj_t *box = ct_col(content, CT_PAD, 12);
+    lv_obj_set_style_pad_top(box, 150, 0);
+    lv_obj_t *t = ct_paragraph(box, B24, title);
+    lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_t *h = ct_paragraph(box, F20, hint);
+    lv_obj_set_style_text_align(h, LV_TEXT_ALIGN_CENTER, 0);
 }
 
 static void show_list(void) {
-    const int count = ct_model_session_count();
+    const int count = ct_model_count();
     if (s_screen != SCR_LIST) {
         s_page = 0;
     }
+    if (s_page >= list_pages()) {
+        s_page = list_pages() - 1;
+    }
     int waiting = 0;
     for (int i = 0; i < count; i++) {
-        waiting += is_waiting(s_state[i]) ? 1 : 0;
+        waiting += is_waiting(ct_model_at(i)->state) ? 1 : 0;
     }
 
     lv_obj_t *screen = ct_screen_new();
-    ct_status_bar(screen);
+    status_bar(screen);
     char buf[48];
     snprintf(buf, sizeof(buf), "会话 %d", count);
     lv_obj_t *nav = ct_nav(screen, buf, NULL);
@@ -169,15 +483,38 @@ static void show_list(void) {
     }
 
     lv_obj_t *content = ct_content(screen, 0);
-    for (int i = s_page * LIST_ROWS; i < count && i < (s_page + 1) * LIST_ROWS; i++) {
-        session_row(content, i);
+    if (count == 0) {
+        if (s_bad_proto) {
+            empty_state(content, "版本对不上", "电脑上的 codetalky 和设备不是同一个版本，更新到同一版本后再连。");
+        } else if (!s_link) {
+            empty_state(content, "没连上电脑", "确认电脑上的 codetalky 在运行，并且和设备在同一个 Wi-Fi 下。正在自动重连。");
+        } else if (!s_synced) {
+            empty_state(content, "正在同步", "电脑正在发来会话列表。");
+        } else {
+            empty_state(content, "电脑上没有会话", "在电脑上用 codetalky claude 或 codetalky codex 启动一个，这里就会出现。");
+        }
+    }
+    const int first = s_page * LIST_ROWS;
+    for (int i = first; i < count && i < first + LIST_ROWS; i++) {
+        session_row(content, ct_model_at(i), i - first);
     }
 
     lv_obj_t *bar = ct_bottom_bar(screen, 76);
-    snprintf(buf, sizeof(buf), "%d/%d", s_page + 1, (count + LIST_ROWS - 1) / LIST_ROWS);
-    ct_pager(bar, buf, on_list_prev, on_list_next);
+    if (count > 0) {
+        snprintf(buf, sizeof(buf), "%d/%d", s_page + 1, list_pages());
+        ct_pager(bar, buf, on_list_prev, on_list_next);
+    }
     ct_spacer(bar);
-    ct_label(bar, F18, "点一行看详情");
+    if (s_banner != NULL) {
+        lv_obj_t *note = ct_box(bar);
+        lv_obj_set_size(note, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_set_style_pad_hor(note, 8, 0);
+        lv_obj_set_style_pad_ver(note, 4, 0);
+        ct_invert(note);
+        ct_label(note, F18, s_banner);
+    } else if (count > 0) {
+        ct_label(bar, F18, "点一行看详情");
+    }
     present(screen, SCR_LIST);
 }
 
@@ -185,35 +522,72 @@ static void show_list(void) {
 
 static const char *const kTabs[] = {"概览", "活动", "改动"};
 
+static int detail_pages(const ct_session_t *s) {
+    int pages = 1;
+    if (s_tab == 1) {
+        pages = (s->log_count + ACTIVITY_ROWS - 1) / ACTIVITY_ROWS;
+    } else if (s_tab == 2) {
+        pages = s->hunk_count;
+    }
+    return pages > 0 ? pages : 1;
+}
+
 static void on_tab(lv_event_t *e) {
     s_tab = (int)(intptr_t)lv_event_get_user_data(e);
     s_page = 0;
     show_detail();
 }
 
-static int activity_pages(const ct_session_t *s) {
-    return (s->activity_count + ACTIVITY_ROWS - 1) / ACTIVITY_ROWS;
+static void on_show_activity(lv_event_t *e) {
+    (void)e;
+    s_tab = 1;
+    s_page = 0;
+    show_detail();
 }
 
-static void on_detail_prev(lv_event_t *e) { (void)e; if (s_page > 0) { s_page--; show_detail(); } }
+static void on_detail_prev(lv_event_t *e) {
+    (void)e;
+    if (s_page > 0) {
+        s_page--;
+        show_detail();
+    }
+}
+
 static void on_detail_next(lv_event_t *e) {
     (void)e;
-    const ct_session_t *s = ct_model_session(s_sel);
-    const int pages = s_tab == 1 ? activity_pages(s) : (s_tab == 2 ? s->hunk_total : 1);
-    if (s_page + 1 < pages) { s_page++; show_detail(); }
+    const ct_session_t *s = current();
+    if (s != NULL && s_page + 1 < detail_pages(s)) {
+        s_page++;
+        show_detail();
+    }
 }
 
-static void activity_row(lv_obj_t *parent, const ct_activity_t *a, int height, bool tappable) {
+static void on_go_session(lv_event_t *e) {
+    (void)e;
+    const ct_session_t *s = current();
+    if (s != NULL) {
+        open_session(s);
+    }
+}
+
+static void activity_row(lv_obj_t *parent, const ct_log_t *a, int height, bool tappable) {
     lv_obj_t *row = ct_row(parent, height, tappable ? CT_PAD : 0, 8);
-    lv_obj_t *time = ct_label(row, M18, a->time);
+    char buf[32];
+    ct_fmt_clock(buf, sizeof(buf), a->at);
+    lv_obj_t *time = ct_label(row, M18, buf);
     lv_obj_set_width(time, 56);
     lv_obj_t *verb = ct_label(row, MB20, a->verb);
     lv_obj_set_width(verb, 62);
     ct_label_fill(row, M20, a->target);
-    if (a->bad) {
-        ct_chip(row, a->result, true, false);
+    if (a->has_stat) {
+        ct_fmt_stat(buf, sizeof(buf), a->add, a->del);
     } else {
-        ct_label(row, MB20, a->result);
+        snprintf(buf, sizeof(buf), "%s", a->res != NULL ? a->res : "");
+    }
+    if (a->bad) {
+        ct_chip(row, buf, true, false);
+    } else if (buf[0] != '\0') {
+        ct_label(row, MB20, buf);
     }
     if (tappable) {
         ct_border(row, 1, LV_BORDER_SIDE_BOTTOM);
@@ -222,191 +596,354 @@ static void activity_row(lv_obj_t *parent, const ct_activity_t *a, int height, b
     }
 }
 
+/* Verb, target and line counts of what the session is on. */
+static void doing_row(lv_obj_t *parent, const char *verb, const char *target, bool has_stat, int add, int del) {
+    lv_obj_t *row = ct_row(parent, 40, 0, 8);
+    ct_verb(row, verb);
+    ct_label_fill(row, MB20, target);
+    if (has_stat) {
+        char stat[32];
+        ct_fmt_stat(stat, sizeof(stat), add, del);
+        ct_label(row, MB20, stat);
+    }
+    ct_label(row, MB24, "›");
+    ct_tappable(row, on_show_activity, NULL);
+}
+
 static void detail_overview(lv_obj_t *screen, const ct_session_t *s) {
-    char buf[96];
-    snprintf(buf, sizeof(buf), "%s · %s", s->model, s->branch);
-    ct_meta(screen, buf, s->meta_right);
+    char buf[96], right[48];
+    if (s->branch != NULL) {
+        snprintf(buf, sizeof(buf), "%s · %s", s->model, s->branch);
+    } else {
+        snprintf(buf, sizeof(buf), "%s", s->model);
+    }
+    fmt_meta_right(right, sizeof(right), s);
+    ct_meta(screen, buf, right);
 
     lv_obj_t *content = ct_content(screen, CT_PAD);
     lv_obj_set_style_pad_row(content, 6, 0);
     lv_obj_set_style_pad_top(content, 10, 0);
 
-    ct_section(content, "正在做");
-    lv_obj_t *now = ct_row(content, 40, 0, 8);
-    ct_verb(now, s->verb);
-    ct_label_fill(now, MB20, s->target);
-    ct_label(now, MB20, "+18 −7");
-    ct_label(now, MB24, "›");
-    ct_tappable(now, NULL, NULL);
+    if (s->state == CT_STATE_ERROR && s->err != NULL) {
+        ct_section(content, "出错了");
+        short_paragraph(content, B20, s->err, 2);
+    }
 
-    ct_section(content, "在想");
-    ct_paragraph(content, F20, s->thinking);
+    if (wants_approval(s)) {
+        ct_section(content, "等你批准");
+        doing_row(content, s->ask.verb, s->ask.target, s->ask.has_stat, s->ask.add, s->ask.del);
+    } else if (wants_answer(s)) {
+        ct_section(content, "等你回答");
+        short_paragraph(content, B20, s->ask.text, 2);
+    } else if (s->now.verb != NULL) {
+        ct_section(content, s->state == CT_STATE_RUNNING ? "正在做" : "最后在做");
+        doing_row(content, s->now.verb, s->now.target, s->now.has_stat, s->now.add, s->now.del);
+    }
+
+    if (s->say != NULL) {
+        ct_section(content, "它说");
+        short_paragraph(content, F20, s->say, 3);
+    }
 
     ct_section(content, "做了这些");
     lv_obj_t *sum = ct_row(content, 26, 0, 8);
-    ct_label_fill(sum, M20, s->summary);
-    if (s->stat != NULL) {
-        ct_label(sum, MB20, s->stat);
+    fmt_summary(buf, sizeof(buf), s);
+    ct_label_fill(sum, M20, buf);
+    ct_fmt_stat(buf, sizeof(buf), s->n.add, s->n.del);
+    if (buf[0] != '\0') {
+        ct_label(sum, MB20, buf);
     }
 
-    snprintf(buf, sizeof(buf), "任务 %d/%d", s->todo_done, s->todo_count);
-    ct_section(content, buf);
-    lv_obj_t *todos = ct_col(content, 0, 1);
-    for (int i = 0; i < s->todo_count; i++) {
-        const char *mark = i < s->todo_done ? "[x]" : (i == s->todo_done ? "[>]" : "[ ]");
-        snprintf(buf, sizeof(buf), "%s %s", mark, s->todos[i]);
-        ct_label(todos, i == s->todo_done ? MB20 : M20, buf);
+    if (s->todo_count > 0) {
+        snprintf(buf, sizeof(buf), "任务 %d/%d", s->todo_done, s->todo_count);
+        ct_section(content, buf);
+        lv_obj_t *todos = ct_col(content, 0, 1);
+        for (int i = 0; i < s->todo_count && i < 6; i++) {
+            const bool doing = i == s->todo_done && s->state != CT_STATE_DONE;
+            const char *mark = i < s->todo_done ? "[x]" : (doing ? "[>]" : "[ ]");
+            snprintf(buf, sizeof(buf), "%s %s", mark, s->todos[i]);
+            lv_obj_t *item = ct_label(todos, doing ? MB20 : M20, buf);
+            lv_label_set_long_mode(item, LV_LABEL_LONG_MODE_DOTS);
+            lv_obj_set_width(item, LV_PCT(100));
+        }
     }
 
-    ct_section(content, "刚才");
-    lv_obj_t *recent = ct_col(content, 0, 2);
-    for (int i = 1; i < 4 && i < s->activity_count; i++) {
-        activity_row(recent, &s->activity[i], 28, false);
+    if (s->log_count > 0) {
+        ct_section(content, "刚才");
+        lv_obj_t *recent = ct_col(content, 0, 2);
+        const int shown = s->todo_count > 4 ? 2 : 3;
+        for (int i = 0; i < shown && i < s->log_count; i++) {
+            activity_row(recent, &s->log[i], 28, false);
+        }
     }
 }
 
 static void detail_activity(lv_obj_t *screen, const ct_session_t *s) {
     lv_obj_t *content = ct_content(screen, 0);
+    if (s->log_count == 0) {
+        empty_state(content, "还没有活动", "它开始干活后，每一步都会列在这里。");
+        return;
+    }
     const int first = s_page * ACTIVITY_ROWS;
-    for (int i = first; i < s->activity_count && i < first + ACTIVITY_ROWS; i++) {
-        activity_row(content, &s->activity[i], 48, true);
+    for (int i = first; i < s->log_count && i < first + ACTIVITY_ROWS; i++) {
+        activity_row(content, &s->log[i], 48, true);
     }
 }
 
 static void detail_changes(lv_obj_t *screen, const ct_session_t *s) {
     lv_obj_t *content = ct_content(screen, 0);
-    for (int i = 0; i < s->file_count; i++) {
+    if (s->file_count == 0 && s->hunk_count == 0) {
+        empty_state(content, "还没有改动", "改了文件以后，这里会列出每个文件和改动的片段。");
+        return;
+    }
+    const ct_hunk_t *h = s->hunk_count > 0 ? &s->hunks[s_page < s->hunk_count ? s_page : 0] : NULL;
+    char buf[96];
+    const int rows = s->file_count < FILE_ROWS ? s->file_count : FILE_ROWS;
+    for (int i = 0; i < rows; i++) {
         const ct_file_t *f = &s->files[i];
         lv_obj_t *row = ct_row(content, 48, CT_PAD, 8);
-        ct_border(row, i == s->file_count - 1 ? 3 : 1, LV_BORDER_SIDE_BOTTOM);
-        if (i == 0) {
+        ct_border(row, i == rows - 1 ? 3 : 1, LV_BORDER_SIDE_BOTTOM);
+        if (h != NULL && strcmp(h->file, f->path) == 0) {
             ct_invert(row);
         }
-        const char status[2] = {f->status, '\0'};
+        const char status[2] = {f->st, '\0'};
         ct_label(row, MB20, status);
         ct_label_fill(row, M20, f->path);
-        ct_label(row, MB20, f->stat);
+        ct_fmt_stat(buf, sizeof(buf), f->add, f->del);
+        ct_label(row, MB20, buf);
         ct_tappable(row, NULL, NULL);
+    }
+    if (s->file_count > rows) {
+        lv_obj_t *more = ct_row(content, 32, CT_PAD, 8);
+        ct_border(more, 3, LV_BORDER_SIDE_BOTTOM);
+        snprintf(buf, sizeof(buf), "还有 %d 个文件", s->file_count - rows);
+        ct_label(more, F18, buf);
+    }
+    if (h == NULL) {
+        return;
     }
     lv_obj_t *hunk = ct_col(content, CT_PAD, 6);
     lv_obj_set_style_pad_top(hunk, 10, 0);
     lv_obj_t *title = ct_row(hunk, 24, 0, 8);
-    ct_label_fill(title, B20, "epd_driver.c · 第 214 行");
-    ct_label(title, M18, "这一处 +5 −1");
+    snprintf(buf, sizeof(buf), "%s · 第 %d 行", ct_basename(h->file), h->line);
+    ct_label_fill(title, B20, buf);
+    char stat[32];
+    ct_fmt_stat(stat, sizeof(stat), h->add, h->del);
+    snprintf(buf, sizeof(buf), "这一处 %s", stat);
+    ct_label(title, M18, buf);
     lv_obj_t *box = ct_diff_box(hunk);
-    static const ct_diff_line_t kLines[] = {
-        {' ', "static int partial_n;"}, {' ', "void epd_flush(rect_t r) {"},
-        {'-', "  epd_refresh(PARTIAL);"}, {'+', "  if (++partial_n >= 8) {"},
-        {'+', "    epd_refresh(FULL);"}, {'+', "    partial_n = 0;"},
-        {'+', "  } else {"}, {'+', "    epd_refresh(PARTIAL);"},
-        {' ', "  }"}, {' ', "  epd_wait_busy();"}, {' ', "}"},
-    };
-    for (unsigned i = 0; i < sizeof(kLines) / sizeof(kLines[0]); i++) {
-        ct_diff_add(box, kLines[i].kind, kLines[i].text);
+    for (int i = 0; i < h->line_count; i++) {
+        ct_diff_add(box, h->lines[i][0], h->lines[i][0] != '\0' ? h->lines[i] + 1 : "");
     }
 }
 
 static void show_detail(void) {
-    const ct_session_t *s = ct_model_session(s_sel);
+    const ct_session_t *s = current();
+    if (s == NULL) {
+        session_gone();
+        return;
+    }
     lv_obj_t *screen = ct_screen_new();
     header(screen, s, on_back_list);
     ct_tabs(screen, kTabs, 3, s_tab, on_tab);
+    if (s_page >= detail_pages(s)) {
+        s_page = detail_pages(s) - 1;
+    }
 
     char buf[32];
     if (s_tab == 0) {
         detail_overview(screen, s);
-        snprintf(buf, sizeof(buf), "1/1");
     } else if (s_tab == 1) {
         detail_activity(screen, s);
-        snprintf(buf, sizeof(buf), "%d/%d", s_page + 1, activity_pages(s));
     } else {
         detail_changes(screen, s);
-        snprintf(buf, sizeof(buf), "%d/%d 处", s_page + 1, s->hunk_total);
+    }
+    if (s_tab == 2) {
+        snprintf(buf, sizeof(buf), "%d/%d 处", s->hunk_count > 0 ? s_page + 1 : 0, s->hunk_count);
+    } else {
+        snprintf(buf, sizeof(buf), "%d/%d", s_page + 1, detail_pages(s));
     }
 
     lv_obj_t *bar = ct_bottom_bar(screen, 76);
     ct_pager(bar, buf, on_detail_prev, on_detail_next);
     ct_spacer(bar);
-    ct_button(bar, "发指令", B20, 112, 56, true, on_open_reply, NULL);
+    if (wants_approval(s)) {
+        ct_button(bar, "去批准", B20, 112, 56, true, on_go_session, NULL);
+    } else if (wants_answer(s)) {
+        ct_button(bar, "去回答", B20, 112, 56, true, on_go_session, NULL);
+    } else if (s->state == CT_STATE_DONE) {
+        ct_button(bar, "看汇报", B20, 112, 56, true, on_go_session, NULL);
+    } else if (s->reply) {
+        ct_button(bar, "发指令", B20, 112, 56, true, on_open_reply, NULL);
+    } else {
+        ct_label(bar, F18, "只能查看");
+    }
     present(screen, SCR_DETAIL);
 }
 
 /* ---------- approve ---------- */
 
-static void on_approve(lv_event_t *e) { (void)e; resolve("已批准，继续运行"); }
-static void on_deny(lv_event_t *e) { (void)e; resolve("已拒绝，等它换个办法"); }
+static void decide(bool allow) {
+    await_ack(ct_proto_approve(s_sel, s_req, allow));
+}
+
+static void on_approve(lv_event_t *e) {
+    (void)e;
+    decide(true);
+}
+
+static void on_approve_long(lv_event_t *e) {
+    (void)e;
+    ct_hal_vibrate(80);
+    decide(true);
+}
+
+static void on_approve_short(lv_event_t *e) {
+    (void)e;
+    ct_hal_vibrate(15); /* a tap is not enough here; the hint says to hold */
+}
+
+static void on_deny(lv_event_t *e) {
+    (void)e;
+    decide(false);
+}
+
+static const char *approve_title(const char *verb) {
+    if (strcmp(verb, "Edit") == 0) return "想改这个文件";
+    if (strcmp(verb, "Write") == 0) return "想新建这个文件";
+    if (strcmp(verb, "Bash") == 0) return "想运行这条命令";
+    return "想做这一步";
+}
 
 static void show_approve(void) {
-    const ct_session_t *s = ct_model_session(s_sel);
+    const ct_session_t *s = current();
+    if (s == NULL) {
+        session_gone();
+        return;
+    }
+    if (!wants_approval(s)) {
+        show_detail();
+        return;
+    }
+    const ct_ask_t *ask = &s->ask;
+    snprintf(s_req, sizeof(s_req), "%s", req_of(s));
+
     lv_obj_t *screen = ct_screen_new();
     header(screen, s, on_back_list);
     char buf[96];
-    snprintf(buf, sizeof(buf), "%s · %s", s->agent, s->model);
-    ct_meta(screen, buf, s->expiry);
+    fmt_ago(buf, sizeof(buf), "等了 ", s->since);
+    agent_meta(screen, s, buf);
 
     lv_obj_t *content = ct_content(screen, CT_PAD);
     lv_obj_set_style_pad_row(content, 6, 0);
     lv_obj_set_style_pad_top(content, 10, 0);
 
-    ct_section(content, "想改这个文件");
-    lv_obj_t *file = ct_row(content, 28, 0, 8);
-    ct_verb(file, s->verb);
-    ct_label_fill(file, MB20, s->target);
-    ct_label(file, MB20, s->hunk_stat);
-    lv_obj_t *box = ct_diff_box(content);
-    for (int i = 0; i < s->hunk_count; i++) {
-        ct_diff_add(box, s->hunk[i].kind, s->hunk[i].text);
+    ct_section(content, approve_title(ask->verb));
+    if (ask->line_count == 0) {
+        /* A command, or a tool call with nothing to diff: show it whole. */
+        lv_obj_t *cmd = ct_col(content, 12, 0);
+        lv_obj_set_style_pad_ver(cmd, 10, 0);
+        ct_border(cmd, 2, LV_BORDER_SIDE_FULL);
+        if (strcmp(ask->verb, "Bash") != 0) {
+            ct_label(cmd, MB20, ask->verb);
+        }
+        short_paragraph(cmd, MB20, ask->target, 5);
+    } else {
+        lv_obj_t *file = ct_row(content, 28, 0, 8);
+        ct_verb(file, ask->verb);
+        ct_label_fill(file, MB20, ask->target);
+        if (ask->has_stat) {
+            ct_fmt_stat(buf, sizeof(buf), ask->add, ask->del);
+            ct_label(file, MB20, buf);
+        }
+        lv_obj_t *box = ct_diff_box(content);
+        for (int i = 0; i < ask->line_count && i < APPROVE_LINES; i++) {
+            const char *line = ask->lines[i];
+            ct_diff_add(box, line[0], line[0] != '\0' ? line + 1 : "");
+        }
+        lv_obj_t *more = ct_row(content, 48, 12, 8);
+        ct_border(more, 2, LV_BORDER_SIDE_FULL);
+        snprintf(buf, sizeof(buf), ask->line > 0 ? "看完整改动 · 第 %d 行" : "看完整改动", ask->line);
+        ct_label_fill(more, B20, buf);
+        ct_label(more, MB24, "›");
+        ct_tappable(more, NULL, NULL);
     }
-    lv_obj_t *more = ct_row(content, 48, 12, 8);
-    ct_border(more, 2, LV_BORDER_SIDE_FULL);
-    ct_label_fill(more, B20, "看完整改动");
-    ct_label(more, MB24, "›");
-    ct_tappable(more, NULL, NULL);
 
-    ct_section(content, "它的理由");
-    ct_paragraph(content, F20, s->reason);
+    if (ask->why != NULL) {
+        ct_section(content, "它的理由");
+        short_paragraph(content, F20, ask->why, 3);
+    }
 
     ct_section(content, "这一轮");
     lv_obj_t *sum = ct_row(content, 26, 0, 8);
-    ct_label_fill(sum, M20, s->counts);
-    ct_label(sum, MB20, s->stat);
+    fmt_counts(buf, sizeof(buf), s);
+    ct_label_fill(sum, M20, buf);
+    ct_fmt_stat(buf, sizeof(buf), s->n.add, s->n.del);
+    ct_label(sum, MB20, buf);
 
     lv_obj_t *hint = ct_row(screen, 32, CT_PAD, 0);
-    ct_label(hint, F18, "删除、推送这类命令要长按“批准”才生效");
+    if (ask->risky) {
+        ct_label(hint, F18, "有风险的操作，要长按“批准”才生效");
+    } else if (ask->until > 0) {
+        char clock[8];
+        ct_fmt_clock(clock, sizeof(clock), ask->until);
+        snprintf(buf, sizeof(buf), "%s 前没批准，就要回电脑确认", clock);
+        ct_label(hint, F18, buf);
+    }
 
     lv_obj_t *bar = ct_bottom_bar(screen, 88);
     lv_obj_set_style_pad_column(bar, 12, 0);
     lv_obj_t *deny = ct_button(bar, "拒绝", B24, 100, 64, false, on_deny, NULL);
     lv_obj_set_flex_grow(deny, 1);
-    lv_obj_t *ok = ct_button(bar, "批准", B24, 100, 64, true, on_approve, NULL);
-    lv_obj_set_flex_grow(ok, 1);
+    if (ask->risky) {
+        lv_obj_t *ok = ct_button(bar, "长按批准", B24, 100, 64, true, NULL, NULL);
+        lv_obj_add_event_cb(ok, on_approve_long, LV_EVENT_LONG_PRESSED, NULL);
+        lv_obj_add_event_cb(ok, on_approve_short, LV_EVENT_SHORT_CLICKED, NULL);
+        lv_obj_set_flex_grow(ok, 1);
+    } else {
+        lv_obj_t *ok = ct_button(bar, "批准", B24, 100, 64, true, on_approve, NULL);
+        lv_obj_set_flex_grow(ok, 1);
+    }
     present(screen, SCR_APPROVE);
 }
 
 /* ---------- question ---------- */
 
 static void on_option(lv_event_t *e) {
-    (void)e;
-    resolve("已回答，继续运行");
+    const int option = (int)(intptr_t)lv_event_get_user_data(e);
+    await_ack(ct_proto_answer(s_sel, s_req, option));
 }
 
 static void show_question(void) {
-    const ct_session_t *s = ct_model_session(s_sel);
+    const ct_session_t *s = current();
+    if (s == NULL) {
+        session_gone();
+        return;
+    }
+    if (!wants_answer(s)) {
+        show_detail();
+        return;
+    }
+    const ct_ask_t *ask = &s->ask;
+    snprintf(s_req, sizeof(s_req), "%s", req_of(s));
+
     lv_obj_t *screen = ct_screen_new();
     header(screen, s, on_back_list);
     char buf[96];
-    snprintf(buf, sizeof(buf), "%s · %s", s->agent, s->model);
-    ct_meta(screen, buf, s->meta_right);
+    fmt_meta_right(buf, sizeof(buf), s);
+    agent_meta(screen, s, buf);
 
     lv_obj_t *content = ct_content(screen, CT_PAD);
     lv_obj_set_style_pad_row(content, 8, 0);
     lv_obj_set_style_pad_top(content, 10, 0);
 
     ct_section(content, "它问你");
-    ct_paragraph(content, B24, s->question);
-    ct_paragraph(content, F20, s->question_note);
+    short_paragraph(content, B24, ask->text, 3);
+    if (ask->note != NULL) {
+        short_paragraph(content, F20, ask->note, 3);
+    }
 
-    for (int i = 0; i < s->option_count; i++) {
+    for (int i = 0; i < ask->option_count; i++) {
         lv_obj_t *opt = ct_row(content, 88, 14, 14);
         ct_border(opt, 3, LV_BORDER_SIDE_FULL);
         lv_obj_t *num = ct_box(opt);
@@ -416,11 +953,19 @@ static void show_question(void) {
         lv_obj_center(ct_label(num, MB24, buf));
         lv_obj_t *text = ct_col(opt, 0, 2);
         lv_obj_set_flex_grow(text, 1);
-        ct_label(text, B20, s->options[i].label);
-        ct_label(text, F18, s->options[i].desc);
+        lv_obj_t *label = ct_label(text, B20, ask->options[i].label);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_DOTS);
+        lv_obj_set_width(label, LV_PCT(100));
+        if (ask->options[i].desc != NULL) {
+            lv_obj_t *desc = ct_label(text, F18, ask->options[i].desc);
+            lv_label_set_long_mode(desc, LV_LABEL_LONG_MODE_DOTS);
+            lv_obj_set_width(desc, LV_PCT(100));
+        }
         ct_tappable(opt, on_option, (void *)(intptr_t)i);
     }
-    ct_button(content, "都不是，按住这里说", B20, LV_PCT(100), 64, false, on_open_reply, NULL);
+    if (s->reply) {
+        ct_button(content, "都不是，按住这里说", B20, LV_PCT(100), 64, false, on_open_reply, NULL);
+    }
 
     lv_obj_t *hint = ct_row(screen, 44, CT_PAD, 0);
     lv_obj_set_flex_align(hint, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -432,9 +977,7 @@ static void show_question(void) {
 
 static void on_dismiss(lv_event_t *e) {
     (void)e;
-    s_state[s_sel] = CT_STATE_IDLE;
-    s_note[s_sel] = "已看过，等你的下一步";
-    show_list();
+    await_ack(ct_proto_seen(s_sel));
 }
 
 static void report_para(lv_obj_t *parent, const ct_para_t *p) {
@@ -452,11 +995,11 @@ static void report_para(lv_obj_t *parent, const ct_para_t *p) {
     }
     lv_obj_t *spans = lv_spangroup_create(row);
     lv_obj_remove_style_all(spans);
+    lv_obj_set_width(spans, 1); /* a fixed width makes it wrap; flex grow then sets the real one */
     lv_obj_set_flex_grow(spans, 1);
     lv_obj_set_height(spans, LV_SIZE_CONTENT);
     lv_obj_set_style_text_font(spans, F20, 0);
     lv_obj_set_style_text_line_space(spans, 3, 0);
-    lv_spangroup_set_mode(spans, LV_SPAN_MODE_BREAK);
     if (p->lead != NULL) {
         lv_span_t *lead = lv_spangroup_add_span(spans);
         lv_span_set_text(lead, p->lead);
@@ -468,16 +1011,30 @@ static void report_para(lv_obj_t *parent, const ct_para_t *p) {
 }
 
 static void show_done(void) {
-    const ct_session_t *s = ct_model_session(s_sel);
+    const ct_session_t *s = current();
+    if (s == NULL) {
+        session_gone();
+        return;
+    }
+    if (s->state != CT_STATE_DONE) {
+        show_detail();
+        return;
+    }
     lv_obj_t *screen = ct_screen_new();
     header(screen, s, on_back_list);
-    char buf[96];
-    snprintf(buf, sizeof(buf), "%s · %s", s->model, s->meta_right);
-    ct_meta(screen, buf, s->stat);
+    char took[32], counts[48], buf[128], stat[32];
+    fmt_took(took, sizeof(took), s);
+    fmt_counts(counts, sizeof(counts), s);
+    snprintf(buf, sizeof(buf), "%s · %s · %s", s->model, took, counts);
+    ct_fmt_stat(stat, sizeof(stat), s->n.add, s->n.del);
+    ct_meta(screen, buf, stat[0] != '\0' ? stat : NULL);
 
     lv_obj_t *content = ct_content(screen, CT_PAD);
     lv_obj_set_style_pad_row(content, 7, 0);
     lv_obj_set_style_pad_top(content, 10, 0);
+    if (s->report_count == 0) {
+        ct_paragraph(content, F20, "做完了，没有留下说明。");
+    }
     for (int i = 0; i < s->report_count; i++) {
         report_para(content, &s->report[i]);
     }
@@ -485,39 +1042,50 @@ static void show_done(void) {
     lv_obj_t *bar = ct_bottom_bar(screen, 76);
     ct_pager(bar, "1/1", NULL, NULL);
     ct_spacer(bar);
-    ct_button(bar, "知道了", B20, 96, 56, false, on_dismiss, NULL);
-    ct_button(bar, "回复", B20, 80, 56, true, on_open_reply, NULL);
+    ct_button(bar, "知道了", B20, 96, 56, !s->reply, on_dismiss, NULL);
+    if (s->reply) {
+        ct_button(bar, "回复", B20, 80, 56, true, on_open_reply, NULL);
+    }
     present(screen, SCR_DONE);
 }
 
 /* ---------- reply ---------- */
 
 static void on_quick(lv_event_t *e) {
-    (void)e;
-    resolve("已发送，继续运行");
+    const char *text = ct_model_quick((int)(intptr_t)lv_event_get_user_data(e));
+    if (text != NULL) {
+        await_ack(ct_proto_reply(s_sel, text));
+    }
 }
 
-static void on_hold_to_talk(lv_event_t *e) { (void)e; show_voice(); }
+static void on_hold_to_talk(lv_event_t *e) {
+    (void)e;
+    show_voice();
+}
 
 static void show_reply(void) {
-    const ct_session_t *s = ct_model_session(s_sel);
+    const ct_session_t *s = current();
+    if (s == NULL) {
+        session_gone();
+        return;
+    }
     lv_obj_t *screen = ct_screen_new();
-    ct_status_bar(screen);
+    status_bar(screen);
     lv_obj_t *nav = ct_nav(screen, s->name, on_back_from_reply);
     ct_chip(nav, "回复", false, true);
-    char buf[96];
-    snprintf(buf, sizeof(buf), "%s · %s", s->agent, s->model);
-    ct_meta(screen, buf, state_text(s_state[s_sel]));
+    agent_meta(screen, s, state_text(s->state));
 
     lv_obj_t *content = ct_content(screen, CT_PAD);
     lv_obj_set_style_pad_row(content, 8, 0);
     lv_obj_set_style_pad_top(content, 12, 0);
 
-    ct_section(content, "点一句直接发");
-    for (int i = 0; i < ct_model_quick_reply_count(); i++) {
+    if (ct_model_quick_count() > 0) {
+        ct_section(content, "点一句直接发");
+    }
+    for (int i = 0; i < ct_model_quick_count(); i++) {
         lv_obj_t *q = ct_row(content, 60, 14, 8);
         ct_border(q, 3, LV_BORDER_SIDE_FULL);
-        ct_label_fill(q, B20, ct_model_quick_reply(i));
+        ct_label_fill(q, B20, ct_model_quick(i));
         ct_label(q, MB24, "›");
         ct_tappable(q, on_quick, (void *)(intptr_t)i);
     }
@@ -533,23 +1101,29 @@ static void show_reply(void) {
 
     lv_obj_t *hint = ct_row(screen, 44, CT_PAD, 0);
     lv_obj_set_flex_align(hint, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    ct_label(hint, F18, "按住机身上的 BOOT 键也一样");
+    ct_label(hint, F18, s->state == CT_STATE_RUNNING ? "它正在干活，这句话会排在当前这一步之后"
+                                                     : "按住机身上的 BOOT 键也一样");
     present(screen, SCR_REPLY);
 }
 
 /* ---------- voice confirmation ---------- */
 
-static void on_send(lv_event_t *e) { (void)e; resolve("已发送，继续运行"); }
+static void on_send(lv_event_t *e) {
+    (void)e;
+    await_ack(ct_proto_reply(s_sel, s_heard));
+}
 
 static void show_voice(void) {
-    const ct_session_t *s = ct_model_session(s_sel);
+    const ct_session_t *s = current();
+    if (s == NULL) {
+        session_gone();
+        return;
+    }
     lv_obj_t *screen = ct_screen_new();
-    ct_status_bar(screen);
+    status_bar(screen);
     lv_obj_t *nav = ct_nav(screen, s->name, on_back_reply);
     ct_chip(nav, "语音", false, true);
-    char buf[96];
-    snprintf(buf, sizeof(buf), "%s · %s", s->agent, s->model);
-    ct_meta(screen, buf, "豆包识别");
+    agent_meta(screen, s, "豆包识别");
 
     lv_obj_t *content = ct_content(screen, CT_PAD);
     lv_obj_set_style_pad_row(content, 8, 0);
@@ -561,16 +1135,22 @@ static void show_voice(void) {
     ct_border(heard, 2, LV_BORDER_SIDE_FULL);
     ct_paragraph(heard, B24, s_heard);
 
-    ct_section(content, "它现在");
-    lv_obj_t *now = ct_row(content, 28, 0, 8);
-    ct_verb(now, s->verb);
-    ct_label_fill(now, M20, s->target);
+    if (s->now.verb != NULL) {
+        ct_section(content, "它现在");
+        lv_obj_t *now = ct_row(content, 28, 0, 8);
+        ct_verb(now, s->now.verb);
+        ct_label_fill(now, M20, s->now.target);
+    }
 
-    ct_section(content, "它刚说");
-    ct_paragraph(content, F20, s->thinking);
+    if (s->say != NULL) {
+        ct_section(content, "它刚说");
+        short_paragraph(content, F20, s->say, 3);
+    }
 
     ct_section(content, "发出去之后");
-    ct_paragraph(content, F20, "这句话排在它当前这一步后面，不会打断正在进行的修改。");
+    ct_paragraph(content, F20,
+                 s->state == CT_STATE_RUNNING ? "这句话排在它当前这一步后面，不会打断正在进行的修改。"
+                                              : "它会马上开始按这句话去做。");
 
     lv_obj_t *bar = ct_bottom_bar(screen, 88);
     lv_obj_set_style_pad_column(bar, 12, 0);
@@ -581,21 +1161,149 @@ static void show_voice(void) {
     present(screen, SCR_VOICE);
 }
 
+/* ---------- following the data ---------- */
+
+static uint32_t hash_pair(const char *a, const char *b) {
+    uint32_t h = 2166136261u; /* FNV-1a */
+    for (const char *p = a; *p != '\0'; p++) h = (h ^ (uint8_t)*p) * 16777619u;
+    h = (h ^ 0xff) * 16777619u;
+    for (const char *p = b; *p != '\0'; p++) h = (h ^ (uint8_t)*p) * 16777619u;
+    return h;
+}
+
+/* Buzz when a session starts waiting for the user. */
+static void announce_new_requests(void) {
+    if (ct_model_rev() == s_announced_rev) {
+        return;
+    }
+    s_announced_rev = ct_model_rev();
+    uint32_t now[CT_MAX_SESSIONS];
+    int count = 0;
+    bool fresh = false;
+    for (int i = 0; i < ct_model_count(); i++) {
+        const ct_session_t *s = ct_model_at(i);
+        if (!wants_approval(s) && !wants_answer(s)) {
+            continue;
+        }
+        const uint32_t h = hash_pair(s->id, req_of(s));
+        bool known = false;
+        for (int j = 0; j < s_announced_count; j++) {
+            known = known || s_announced[j] == h;
+        }
+        fresh = fresh || !known;
+        now[count++] = h;
+    }
+    memcpy(s_announced, now, sizeof(now[0]) * (size_t)count);
+    s_announced_count = count;
+    if (fresh) {
+        ct_hal_vibrate(150);
+    }
+}
+
+/* Redraw the current screen if what it shows has changed. */
+static void follow_data(void) {
+    if (key_eq(key_now(), s_drawn)) {
+        return;
+    }
+    s_next_refresh = s_partials + 1 >= FAST_EVERY || s_resynced ? CT_REFRESH_FAST : CT_REFRESH_PARTIAL;
+    s_resynced = false;
+    if (s_screen == SCR_LIST) {
+        show_list();
+        return;
+    }
+    const ct_session_t *s = current();
+    if (s == NULL) {
+        session_gone();
+        return;
+    }
+    switch (s_screen) {
+    case SCR_APPROVE:
+        /* Answered elsewhere, timed out, or replaced by another request: leave. */
+        if (!wants_approval(s) || strcmp(req_of(s), s_req) != 0) {
+            s_next_refresh = CT_REFRESH_FAST;
+            open_session(s);
+        } else {
+            show_approve();
+        }
+        break;
+    case SCR_QUESTION:
+        if (!wants_answer(s) || strcmp(req_of(s), s_req) != 0) {
+            s_next_refresh = CT_REFRESH_FAST;
+            open_session(s);
+        } else {
+            show_question();
+        }
+        break;
+    case SCR_DONE:
+        if (s->state != CT_STATE_DONE) {
+            s_next_refresh = CT_REFRESH_FAST;
+        }
+        show_done();
+        break;
+    case SCR_REPLY: show_reply(); break;
+    case SCR_VOICE: show_voice(); break;
+    default: show_detail(); break;
+    }
+}
+
+static void on_poll(lv_timer_t *timer) {
+    (void)timer;
+    announce_new_requests();
+    if (s_pending.seq != 0) {
+        if (lv_tick_elaps(s_pending.sent_at) >= ACK_TIMEOUT_MS) {
+            finish_action(CT_ACK_TIMEOUT);
+        }
+        return;
+    }
+    if (input_pressed() || lv_tick_elaps(s_drawn_at) < MIN_REDRAW_MS) {
+        return;
+    }
+    follow_data();
+}
+
 /* ---------- entry points ---------- */
 
 void ct_ui_init(void) {
     ct_widgets_init();
-    const int count = ct_model_session_count();
-    for (int i = 0; i < count && i < MAX_SESSIONS; i++) {
-        s_state[i] = ct_model_session(i)->state;
-        s_note[i] = NULL;
+    for (lv_indev_t *i = lv_indev_get_next(NULL); i != NULL; i = lv_indev_get_next(i)) {
+        lv_indev_set_long_press_time(i, LONG_PRESS_MS);
     }
-    s_screen = SCR_DETAIL; /* so the first show_list() starts on page 0 */
     show_list();
+    lv_timer_create(on_poll, POLL_MS, NULL);
+}
+
+void ct_ui_on_link(bool up) {
+    s_link = up;
+    s_synced = false;
+    ct_proto_link(up);
+    if (!up && s_pending.seq != 0) {
+        finish_action(CT_ACK_OFFLINE);
+    }
+}
+
+void ct_ui_on_message(const char *json, size_t len) {
+    const ct_event_t ev = ct_proto_receive(json, len);
+    switch (ev.type) {
+    case CT_EV_HELLO:
+        s_synced = false;
+        s_bad_proto = false;
+        break;
+    case CT_EV_READY:
+        s_synced = true;
+        s_resynced = true;
+        break;
+    case CT_EV_BAD_PROTO: s_bad_proto = true; break;
+    case CT_EV_ACK:
+        if (s_pending.seq != 0 && ev.seq == s_pending.seq) {
+            finish_action(ev.ack);
+        }
+        break;
+    default: break;
+    }
 }
 
 void ct_ui_on_key(ct_key_t key, bool down) {
-    if (!down) {
+    if (!down || s_pending.seq != 0) {
         return;
     }
     switch (key) {
@@ -604,20 +1312,24 @@ void ct_ui_on_key(ct_key_t key, bool down) {
         break;
     case CT_KEY_VOL_UP:
     case CT_KEY_PREV:
-        if (s_screen == SCR_LIST) on_list_prev(NULL); else if (s_screen == SCR_DETAIL) on_detail_prev(NULL);
+        if (s_screen == SCR_LIST) on_list_prev(NULL);
+        else if (s_screen == SCR_DETAIL) on_detail_prev(NULL);
         break;
     case CT_KEY_VOL_DOWN:
     case CT_KEY_NEXT:
-        if (s_screen == SCR_LIST) on_list_next(NULL); else if (s_screen == SCR_DETAIL) on_detail_next(NULL);
+        if (s_screen == SCR_LIST) on_list_next(NULL);
+        else if (s_screen == SCR_DETAIL) on_detail_next(NULL);
         break;
-    case CT_KEY_BOOT:
-        if (s_screen != SCR_LIST) {
+    case CT_KEY_BOOT: {
+        const ct_session_t *s = current();
+        if (s_screen != SCR_LIST && s != NULL && s->reply) {
             if (s_screen != SCR_REPLY && s_screen != SCR_VOICE) {
                 s_reply_from = s_screen;
             }
             show_voice();
         }
         break;
+    }
     default:
         break;
     }

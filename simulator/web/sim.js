@@ -32,6 +32,7 @@ let partialsSinceFull = 0;
 let overlayRect = null; // area shown in black/white only, waiting for its grey pass
 let overlayTimer = null;
 let greyEnabled = true;
+let socket = null; // open WebSocket to the bridge, or null
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -183,6 +184,44 @@ function onFlush(x1, y1, x2, y2, last, mode) {
   scheduleOverlay(mode === 2 ? { x1: 0, y1: 0, x2: W - 1, y2: H - 1 } : rect);
 }
 
+// ---- link to the bridge: the same server that serves this page ----
+
+function toUi(text) {
+  const size = sim.lengthBytesUTF8(text) + 1;
+  const ptr = sim._malloc(size);
+  sim.stringToUTF8(text, ptr, size);
+  sim._sim_net_rx(ptr, size - 1);
+  sim._free(ptr);
+}
+
+function onNetSend(text) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+  socket.send(text);
+  return true;
+}
+
+function connect() {
+  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/device`;
+  $('st-link').textContent = '连接中';
+  const ws = new WebSocket(url);
+  ws.onopen = () => {
+    socket = ws;
+    $('st-link').textContent = '已连接';
+    sim._sim_net_link(1);
+  };
+  ws.onmessage = (event) => {
+    if (typeof event.data === 'string') toUi(event.data);
+  };
+  ws.onclose = () => {
+    if (socket === ws) {
+      socket = null;
+      sim._sim_net_link(0);
+    }
+    $('st-link').textContent = '未连接，2 秒后重试';
+    setTimeout(connect, 2000);
+  };
+}
+
 function onVibrate(ms) {
   device.classList.add('buzz');
   setTimeout(() => device.classList.remove('buzz'), Math.max(ms, 60));
@@ -258,7 +297,7 @@ function bindInput() {
 }
 
 async function start() {
-  sim = await createCodeTalkySim({ onFlush, onVibrate });
+  sim = await createCodeTalkySim({ onFlush, onVibrate, onNetSend });
   W = sim._sim_width();
   H = sim._sim_height();
   canvas.width = W;
@@ -269,6 +308,7 @@ async function start() {
 
   bindInput();
   sim._sim_init();
+  connect();
 
   let last = performance.now();
   setInterval(() => {

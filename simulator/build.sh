@@ -39,15 +39,17 @@ mkdir -p "$BUILD" "$OUT"
 
 mapfile -t LVGL_SRC < <(find "$LVGL/src" -name '*.c' \
   ! -path '*/drivers/*' ! -path '*/libs/thorvg/*' | sort)
+# Third-party C compiled without our warning flags. ESP-IDF ships the same cJSON.
+LVGL_SRC+=("$ROOT/third_party/cjson/cJSON.c")
 if [ ! -f "$ROOT/ui/fonts/gen/ct_fonts.h" ]; then
   echo "fonts missing: run tools/fontpack/build_fonts.py first (see README)" >&2
   exit 1
 fi
 mapfile -t OWN_SRC < <({ find "$ROOT/ui/src" "$ROOT/ui/fonts/gen" -name '*.c'; find "$SIM/wasm" -name '*.c'; } | sort)
 
-CFLAGS="-O2 -DLV_CONF_INCLUDE_SIMPLE -DLV_LVGL_H_INCLUDE_SIMPLE -I$SIM -I$LVGL -I$ROOT/ui/include -I$ROOT/ui/src -I$ROOT/ui/fonts/gen"
+CFLAGS="-O2 -DLV_CONF_INCLUDE_SIMPLE -DLV_LVGL_H_INCLUDE_SIMPLE -I$SIM -I$LVGL -I$ROOT/ui/include -I$ROOT/ui/src -I$ROOT/ui/fonts/gen -I$ROOT/third_party/cjson"
 LDFLAGS="-O2 -sMODULARIZE=1 -sEXPORT_NAME=createCodeTalkySim -sENVIRONMENT=web,node"
-LDFLAGS+=" -sALLOW_MEMORY_GROWTH=1 -sEXPORTED_RUNTIME_METHODS=HEAPU8"
+LDFLAGS+=" -sALLOW_MEMORY_GROWTH=1 -sEXPORTED_RUNTIME_METHODS=HEAPU8,UTF8ToString,stringToUTF8,lengthBytesUTF8"
 LDFLAGS+=" -sEXPORTED_FUNCTIONS=_main,_malloc,_free"
 
 obj_for() {

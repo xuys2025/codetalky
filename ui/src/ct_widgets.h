@@ -49,7 +49,7 @@ lv_obj_t *ct_button(lv_obj_t *parent, const char *text, const lv_font_t *font, i
 
 /* Screen chrome. */
 lv_obj_t *ct_screen_new(void);
-void ct_status_bar(lv_obj_t *screen);
+void ct_status_bar(lv_obj_t *screen, const char *left, const char *right);
 lv_obj_t *ct_nav(lv_obj_t *screen, const char *title, lv_event_cb_t on_back);
 void ct_tabs(lv_obj_t *screen, const char *const *names, int count, int active, lv_event_cb_t on_tab);
 lv_obj_t *ct_meta(lv_obj_t *screen, const char *left, const char *right);
@@ -58,7 +58,6 @@ lv_obj_t *ct_content(lv_obj_t *screen, int32_t pad_x);
 lv_obj_t *ct_bottom_bar(lv_obj_t *screen, int32_t height);
 void ct_pager(lv_obj_t *bar, const char *text, lv_event_cb_t on_prev, lv_event_cb_t on_next);
 /* A boxed, read-only diff. */
-struct ct_diff_line;
 lv_obj_t *ct_diff_box(lv_obj_t *parent);
 void ct_diff_add(lv_obj_t *diff_box, char kind, const char *text);
 

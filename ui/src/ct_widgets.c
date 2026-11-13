@@ -170,12 +170,12 @@ lv_obj_t *ct_screen_new(void) {
     return screen;
 }
 
-void ct_status_bar(lv_obj_t *screen) {
+void ct_status_bar(lv_obj_t *screen, const char *left, const char *right) {
     lv_obj_t *bar = ct_row(screen, 36, CT_PAD, 0);
     ct_invert(bar);
-    ct_label(bar, MB20, "codetalky");
+    ct_label(bar, MB20, left);
     ct_spacer(bar);
-    ct_label(bar, MB20, "14:32 · 82%");
+    ct_label(bar, MB20, right);
 }
 
 lv_obj_t *ct_nav(lv_obj_t *screen, const char *title, lv_event_cb_t on_back) {
