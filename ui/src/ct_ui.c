@@ -385,7 +385,7 @@ static void row_doing(lv_obj_t *row, const ct_session_t *s) {
     } else if (wants_answer(s)) {
         ct_verb(row, "问");
         ct_label_fill(row, F20, s->ask.text);
-    } else if (s->state == CT_STATE_DONE && s->report_count > 0) {
+    } else if ((s->state == CT_STATE_DONE || s->state == CT_STATE_IDLE) && s->report_count > 0) {
         ct_label_fill(row, F20, s->report[0].text);
     } else if (s->state == CT_STATE_ERROR && s->err != NULL) {
         ct_label_fill(row, F20, s->err);

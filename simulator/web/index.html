@@ -12,8 +12,8 @@
   body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, "Microsoft YaHei", sans-serif; }
   main { display: flex; flex-wrap: wrap; gap: 32px; justify-content: center; align-items: flex-start; padding: 24px 16px; }
   .device { background: var(--shell); border: 1px solid var(--edge); border-radius: 22px; padding: 18px 18px 10px; }
-  .device.buzz { animation: buzz 0.06s linear infinite; }
-  @keyframes buzz { 0% { transform: translateX(-1px); } 50% { transform: translateX(1px); } 100% { transform: translateX(-1px); } }
+  #st-buzz { color: var(--muted); }
+  #st-buzz.on { color: var(--fg); font-weight: 700; }
   canvas { display: block; width: var(--screen-w, 480px); aspect-ratio: 480 / 800; background: #e8e6de; touch-action: none; cursor: pointer; }
   .vkeys { display: flex; justify-content: space-around; padding-top: 8px; }
   button { font: inherit; color: inherit; background: transparent; border: 1px solid var(--edge); border-radius: 8px; padding: 6px 12px; cursor: pointer; touch-action: none; user-select: none; }
@@ -55,13 +55,15 @@
     <label><input type="checkbox" id="grey" checked> 停下后叠加灰度</label>
     <dl>
       <dt>电脑</dt><dd id="st-link">—</dd>
+      <dt>震动</dt><dd id="st-buzz">—</dd>
       <dt>上次刷新</dt><dd id="st-mode">—</dd>
+      <dt>刷新区域</dt><dd id="st-area">—</dd>
       <dt>耗时</dt><dd id="st-ms">—</dd>
       <dt>距上次全刷</dt><dd id="st-count">0 次局刷</dd>
       <dt>排队</dt><dd id="st-queue">0</dd>
     </dl>
     <p class="muted">数据来自电脑端服务：在 bridge 目录运行 <code>npm run demo</code>，再打开它给出的地址。</p>
-    <p class="muted">刷新耗时和残影是占位参数，真机到货后按实测校准。屏幕按下后不会立刻变化，这是在模拟墨水屏的刷新延迟。</p>
+    <p class="muted">刷新耗时和残影是占位参数，真机到货后按实测校准。屏幕按下后不会立刻变化，这是在模拟墨水屏的刷新延迟。每次只刷有变化的像素，没变的地方保持原样。</p>
     <p class="muted" id="st-error"></p>
   </div>
 </main>

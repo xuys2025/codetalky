@@ -1,8 +1,17 @@
 // Browser shell for the simulator: drives the WebAssembly UI and models the
-// e-ink panel (1-bit pixels, slow refresh, ghosting) on a canvas.
+// e-ink panel on a canvas.
+//
+// Panel model. Like the SSD1677, the panel remembers what it was last told to show
+// and only drives pixels whose value changes. Every frame from LVGL is compared with
+// that, and only the box around the changed pixels is refreshed: first in black and
+// white, then, once the page has been still for a moment, the grey overlay for just
+// the pixels that were redrawn. Pixels that did not change keep what they show,
+// ghosting included. The firmware's panel driver must follow the same rule: the UI
+// rebuilds whole screens, so without the comparison every clock tick would redrive
+// the entire panel.
 'use strict';
 
-// Placeholder panel behaviour. Calibrate against the real GDEM0397T81 once it arrives.
+// Placeholder panel behaviour. Calibrate against the real panel once it arrives.
 const PANEL = {
   partialMs: 260, // small-area update
   fastMs: 420, // page change with the quick waveform
@@ -13,26 +22,29 @@ const PANEL = {
 };
 const PAPER = [232, 230, 222];
 const INK = [30, 30, 30];
+const LEVEL_SHOWN = [0, 1 / 3, 2 / 3, 1]; // reflectance of grey levels 0 (black) .. 3 (white)
 const MODE_NAMES = ['局刷', '快刷', '全刷', '灰度叠加'];
 
 const canvas = document.getElementById('epd');
 const ctx = canvas.getContext('2d');
-const device = document.getElementById('device');
 const $ = (id) => document.getElementById(id);
 
 let sim;
 let W = 480;
 let H = 800;
-let shown; // Float32Array, reflectance per pixel: 0 = ink, 1 = paper
+let shown; // Float32Array: what each pixel physically shows, 0 = ink, 1 = paper
+let driven; // Uint8Array: grey level each pixel was last told to show
+let needsGrey; // Uint8Array: 1 = redrawn in black and white, still owes its grey pass
 let image;
 let pendingRects = [];
 let busy = Promise.resolve();
 let queued = 0;
 let partialsSinceFull = 0;
-let overlayRect = null; // area shown in black/white only, waiting for its grey pass
+let overlayRect = null; // area with pixels waiting for their grey pass
 let overlayTimer = null;
 let greyEnabled = true;
 let socket = null; // open WebSocket to the bridge, or null
+let buzzTimer = null;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -47,10 +59,14 @@ function unionOf(rects) {
   return u;
 }
 
-// Copy the rect out of the RGB565 framebuffer as 1-bit: 1 = paper, 0 = ink.
-function captureTarget(rect) {
-  const w = rect.x2 - rect.x1 + 1;
-  const h = rect.y2 - rect.y1 + 1;
+const widthOf = (r) => r.x2 - r.x1 + 1;
+const heightOf = (r) => r.y2 - r.y1 + 1;
+
+// Grey level per pixel of the framebuffer inside rect: 0 black, 1 dark, 2 light, 3 white.
+// Levels 0-1 are black and 2-3 white in the black-and-white pass.
+function levelsOf(rect) {
+  const w = widthOf(rect);
+  const h = heightOf(rect);
   const out = new Uint8Array(w * h);
   const heap = sim.HEAPU8;
   const base = sim._sim_framebuffer();
@@ -59,55 +75,31 @@ function captureTarget(rect) {
     for (let x = 0; x < w; x++, j += 2) {
       const c = heap[j] | (heap[j + 1] << 8);
       const lum = ((c >> 11) & 0x1f) * 2.47 + ((c >> 5) & 0x3f) * 2.39 + (c & 0x1f) * 0.9;
-      out[y * w + x] = lum >= 128 ? 1 : 0;
+      out[y * w + x] = lum >= 213 ? 3 : lum >= 128 ? 2 : lum >= 43 ? 1 : 0;
     }
   }
   return out;
 }
 
-// The same rect as the 4 states the grey overlay can show: 0 ink, 1/3, 2/3, 1 paper.
-function captureGrey(rect) {
-  const w = rect.x2 - rect.x1 + 1;
-  const h = rect.y2 - rect.y1 + 1;
-  const out = new Float32Array(w * h);
-  const heap = sim.HEAPU8;
-  const base = sim._sim_framebuffer();
-  for (let y = 0; y < h; y++) {
-    let j = base + ((rect.y1 + y) * W + rect.x1) * 2;
-    for (let x = 0; x < w; x++, j += 2) {
-      const c = heap[j] | (heap[j + 1] << 8);
-      const lum = ((c >> 11) & 0x1f) * 2.47 + ((c >> 5) & 0x3f) * 2.39 + (c & 0x1f) * 0.9;
-      out[y * w + x] = lum >= 213 ? 1 : lum >= 128 ? 2 / 3 : lum >= 43 ? 1 / 3 : 0;
+// The smallest box inside rect where the new levels differ from what the panel shows.
+function changedBox(rect, levels) {
+  const w = widthOf(rect);
+  const box = { x1: W, y1: H, x2: -1, y2: -1 };
+  for (let y = 0; y < heightOf(rect); y++) {
+    const row = (rect.y1 + y) * W + rect.x1;
+    for (let x = 0; x < w; x++) {
+      if (levels[y * w + x] !== driven[row + x]) {
+        if (rect.x1 + x < box.x1) box.x1 = rect.x1 + x;
+        if (rect.x1 + x > box.x2) box.x2 = rect.x1 + x;
+        if (rect.y1 + y < box.y1) box.y1 = rect.y1 + y;
+        box.y2 = rect.y1 + y;
+      }
     }
   }
-  return out;
-}
-
-// Once the page has been still for a moment, add the two grey levels to what was
-// drawn in black and white. Pixels that stay white keep whatever ghosting they have.
-async function overlay() {
-  if (!greyEnabled || !overlayRect) return;
-  const rect = overlayRect;
-  overlayRect = null;
-  const started = performance.now();
-  const grey = captureGrey(rect);
-  await sleep(PANEL.overlayMs);
-  fill(rect, (i, k) => (grey[k] === 1 ? shown[i] : grey[k]));
-  $('st-mode').textContent = MODE_NAMES[3];
-  $('st-ms').textContent = `${Math.round(performance.now() - started)} ms`;
-}
-
-function scheduleOverlay(rect) {
-  overlayRect = overlayRect ? unionOf([overlayRect, rect]) : rect;
-  clearTimeout(overlayTimer);
-  overlayTimer = setTimeout(() => {
-    busy = busy.then(overlay);
-  }, PANEL.overlayDelayMs);
+  return box.x2 < 0 ? null : box;
 }
 
 function paint(rect) {
-  const w = rect.x2 - rect.x1 + 1;
-  const h = rect.y2 - rect.y1 + 1;
   const data = image.data;
   for (let y = rect.y1; y <= rect.y2; y++) {
     for (let x = rect.x1; x <= rect.x2; x++) {
@@ -119,11 +111,12 @@ function paint(rect) {
       data[o + 3] = 255;
     }
   }
-  ctx.putImageData(image, 0, 0, rect.x1, rect.y1, w, h);
+  ctx.putImageData(image, 0, 0, rect.x1, rect.y1, widthOf(rect), heightOf(rect));
 }
 
+// fn(i, k): i indexes the whole screen, k the rect.
 function fill(rect, fn) {
-  const w = rect.x2 - rect.x1 + 1;
+  const w = widthOf(rect);
   for (let y = rect.y1; y <= rect.y2; y++) {
     for (let x = rect.x1; x <= rect.x2; x++) {
       const i = y * W + x;
@@ -133,55 +126,122 @@ function fill(rect, fn) {
   paint(rect);
 }
 
-async function refresh(job) {
-  const { rect, target, mode } = job;
+// Once the page has been still for a moment, give the redrawn pixels their grey level.
+async function overlay() {
+  if (!overlayRect) return;
+  const rect = overlayRect;
+  overlayRect = null;
+  let owed = 0;
+  for (let y = rect.y1; y <= rect.y2; y++) {
+    for (let x = rect.x1; x <= rect.x2; x++) owed += needsGrey[y * W + x];
+  }
+  if (owed === 0) return;
+  if (!greyEnabled) {
+    for (let y = rect.y1; y <= rect.y2; y++) needsGrey.fill(0, y * W + rect.x1, y * W + rect.x2 + 1);
+    return;
+  }
   const started = performance.now();
+  await sleep(PANEL.overlayMs);
+  fill(rect, (i) => {
+    if (!needsGrey[i]) return shown[i];
+    needsGrey[i] = 0;
+    return LEVEL_SHOWN[driven[i]];
+  });
+  $('st-mode').textContent = MODE_NAMES[3];
+  $('st-ms').textContent = `${Math.round(performance.now() - started)} ms`;
+  $('st-area').textContent = `${owed} 个像素`;
+}
+
+function scheduleOverlay(rect) {
+  overlayRect = overlayRect ? unionOf([overlayRect, rect]) : rect;
+  clearTimeout(overlayTimer);
+  overlayTimer = setTimeout(() => {
+    busy = busy.then(overlay);
+  }, PANEL.overlayDelayMs);
+}
+
+async function refresh(job) {
+  const { box, levels, before, mode } = job;
+  const started = performance.now();
+  const white = (k) => levels[k] >= 2;
   if (mode === 2) {
     // Whole screen flashes black, then white, then settles on the new image with no ghosting.
-    const all = { x1: 0, y1: 0, x2: W - 1, y2: H - 1 };
-    const whole = captureTarget(all);
-    fill(all, () => 0);
+    fill(box, () => 0);
     await sleep(PANEL.fullMs * 0.35);
-    fill(all, () => 1);
+    fill(box, () => 1);
     await sleep(PANEL.fullMs * 0.35);
-    fill(all, (_, k) => whole[k]);
+    fill(box, (i, k) => (white(k) ? 1 : 0));
     await sleep(PANEL.fullMs * 0.3);
     partialsSinceFull = 0;
   } else if (mode === 1) {
-    // One inverted flash of the changed area, then the new image; old ink leaves a faint trace.
-    fill(rect, (i, k) => (target[k] ? 0 : 1));
+    // One inverted flash of the box, then the new image; old ink leaves a faint trace.
+    fill(box, (i, k) => (white(k) ? 0 : 1));
     await sleep(PANEL.fastMs * 0.45);
-    fill(rect, (i, k) => (target[k] ? 1 - PANEL.ghost / 2 : 0));
+    fill(box, (i, k) => (white(k) ? 1 - PANEL.ghost / 2 : 0));
     await sleep(PANEL.fastMs * 0.55);
     partialsSinceFull++;
   } else {
     await sleep(PANEL.partialMs);
-    // Pixels turning white keep a trace of the old ink; traces stay until a full refresh.
-    fill(rect, (i, k) => {
-      if (!target[k]) return 0;
-      return shown[i] < 0.5 ? 1 - PANEL.ghost : shown[i];
+    // Only pixels whose level changed are driven; the rest keep what they show.
+    fill(box, (i, k) => {
+      if (levels[k] === before[k]) return shown[i];
+      if (!white(k)) return 0;
+      return shown[i] < 0.5 ? 1 - PANEL.ghost : 1;
     });
     partialsSinceFull++;
+  }
+  // Redrawn pixels that should be grey get it in the overlay pass.
+  const w = widthOf(box);
+  for (let y = box.y1; y <= box.y2; y++) {
+    for (let x = box.x1; x <= box.x2; x++) {
+      const k = (y - box.y1) * w + (x - box.x1);
+      if (mode !== 0 || levels[k] !== before[k]) {
+        needsGrey[y * W + x] = levels[k] === 1 || levels[k] === 2 ? 1 : 0;
+      }
+    }
   }
   $('st-mode').textContent = MODE_NAMES[mode] ?? String(mode);
   $('st-ms').textContent = `${Math.round(performance.now() - started)} ms`;
   $('st-count').textContent = `${partialsSinceFull} 次局刷`;
+  $('st-area').textContent = `${widthOf(box)} × ${heightOf(box)}`;
 }
 
 function onFlush(x1, y1, x2, y2, last, mode) {
   pendingRects.push({ x1, y1, x2, y2 });
   if (!last) return;
-  const rect = unionOf(pendingRects);
+  const whole = { x1: 0, y1: 0, x2: W - 1, y2: H - 1 };
+  const rect = mode === 2 ? whole : unionOf(pendingRects);
   pendingRects = [];
+  const levels = levelsOf(rect);
+  const box = mode === 2 ? rect : changedBox(rect, levels);
+  if (!box) {
+    $('st-area').textContent = '没有变化，不刷';
+    return;
+  }
+  // Cut the new levels and the panel's current ones down to the box, and tell the
+  // panel the new image right away so the next frame is compared against it.
+  const w = widthOf(box);
+  const rw = widthOf(rect);
+  const next = new Uint8Array(w * heightOf(box));
+  const before = new Uint8Array(next.length);
+  for (let y = 0; y < heightOf(box); y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (box.y1 + y) * W + box.x1 + x;
+      const k = y * w + x;
+      next[k] = levels[(box.y1 - rect.y1 + y) * rw + (box.x1 - rect.x1 + x)];
+      before[k] = driven[i];
+      driven[i] = next[k];
+    }
+  }
   // The panel does one refresh at a time; later frames wait, as on the device.
-  const job = { rect, target: captureTarget(rect), mode };
+  const job = { box, levels: next, before, mode };
   queued++;
   $('st-queue').textContent = String(queued);
   busy = busy.then(() => refresh(job)).then(() => {
     queued--;
     $('st-queue').textContent = String(queued);
   });
-  scheduleOverlay(mode === 2 ? { x1: 0, y1: 0, x2: W - 1, y2: H - 1 } : rect);
+  scheduleOverlay(box);
 }
 
 // ---- link to the bridge: the same server that serves this page ----
@@ -222,9 +282,13 @@ function connect() {
   };
 }
 
+// The motor buzzes; the screen does not move. Shown as a lamp in the side panel.
 function onVibrate(ms) {
-  device.classList.add('buzz');
-  setTimeout(() => device.classList.remove('buzz'), Math.max(ms, 60));
+  const lamp = $('st-buzz');
+  lamp.textContent = `● ${ms} ms`;
+  lamp.classList.add('on');
+  clearTimeout(buzzTimer);
+  buzzTimer = setTimeout(() => lamp.classList.remove('on'), Math.max(ms, 150));
 }
 
 function pointerPos(event) {
@@ -303,6 +367,8 @@ async function start() {
   canvas.width = W;
   canvas.height = H;
   shown = new Float32Array(W * H).fill(1);
+  driven = new Uint8Array(W * H).fill(3);
+  needsGrey = new Uint8Array(W * H);
   image = ctx.createImageData(W, H);
   paint({ x1: 0, y1: 0, x2: W - 1, y2: H - 1 });
 
