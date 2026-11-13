@@ -70,6 +70,22 @@ const WAITING_THERE = '在电脑上等你确认';
 const STOPPED_THERE = '在电脑上中断了，等你的下一条指令';
 /** How often a working Codex session's file is read between hooks. */
 const POLL_MS = 2000;
+/** How long an instruction typed into the terminal may take to show up as the agent's prompt. */
+const TAKEN_MS = 30_000;
+
+/** A tool call's input for comparing two calls: keys in order, without the reason given for it. */
+function sameInput(input: Record<string, unknown>): string {
+  const keys = Object.keys(input)
+    .filter((k) => k !== 'description' && k !== 'justification')
+    .sort();
+  return JSON.stringify(keys.map((k) => [k, input[k]]));
+}
+
+/** What the device shows while instructions wait for the agent's turn to end. */
+function waitingSay(queued: string[]): string {
+  const more = queued.length > 1 ? `（后面还有 ${queued.length - 1} 条）` : '';
+  return `它做完这一轮再发给它：${firstLine(queued[0] ?? '', 40)}${more}`;
+}
 
 type Event = Record<string, unknown> & { session_id: string; hook_event_name: string };
 
@@ -137,6 +153,12 @@ interface Session {
   waiting: boolean;
   /** Instructions from the device that wait for the agent to finish its turn. */
   queued: string[];
+  /**
+   * One of them was typed and the agent hasn't started on it yet: the next waits for
+   * the turn after (it would otherwise go out before the agent says it's busy).
+   * Calling it stops the timer that gives up waiting.
+   */
+  typed: (() => void) | null;
 }
 
 const emptyCounts = () => ({ read: 0, edit: 0, new: 0, cmd: 0, add: 0, del: 0 });
@@ -146,12 +168,11 @@ const isBusy = (state: string | undefined) => state === 'running' || state === '
 
 /**
  * What the agent's terminal prompt for this request shows that another request's
- * wouldn't: the command (its start, as long ones get cut), or the first file's name.
+ * wouldn't: the whole command, or the first file's name.
  */
-function needleOf(held: Pick<Held, 'tool' | 'target'>): string {
-  const target = held.target.replace(/ 等 \d+ 个文件$/, '');
-  const shown = /^(apply_patch|Edit|Write)$/.test(held.tool) ? baseName(target) : target;
-  return shown.slice(0, 60);
+function needleOf(held: Pick<Held, 'tool' | 'target'>): { text: string; whole: boolean } {
+  if (/^(apply_patch|Edit|Write)$/.test(held.tool)) return { text: baseName(held.target.replace(/ 等 \d+ 个文件$/, '')), whole: false };
+  return { text: held.target, whole: true };
 }
 
 export class ClaudeSource {
@@ -236,6 +257,7 @@ export class ClaudeSource {
       token: run,
       waiting: true,
       queued: [],
+      typed: null,
     };
     this.sessions.set(id, session);
     this.put(id, cwd || undefined, true);
@@ -315,22 +337,34 @@ export class ClaudeSource {
   private reply(id: string, text: string): void {
     const session = this.sessions.get(id);
     if (!session?.token) return;
-    if (isBusy(this.hub.get(id)?.state)) {
-      session.queued.push(text);
+    session.queued.push(text);
+    this.sendQueued(session);
+    if (session.queued.length > 0) {
       this.change(id, (s) => {
-        s.say = `它做完这一轮再发给它：${firstLine(text, 40)}`;
+        s.say = waitingSay(session.queued);
       });
-      return;
     }
-    // The agent reports the prompt through UserPromptSubmit, which logs it.
-    this.options.runs?.type(session.token, text);
   }
 
-  /** The agent finished a turn: send the next instruction that waited for it. */
+  /**
+   * Type the next waiting instruction, if the agent is between turns and has started
+   * on the last one typed. It reports the prompt through UserPromptSubmit, which logs it.
+   */
   private sendQueued(session: Session): void {
-    if (session.queued.length === 0 || !session.token || !this.options.runs?.has(session.token)) return;
+    if (session.queued.length === 0 || session.typed || !session.token || !this.options.runs?.has(session.token)) return;
     if (isBusy(this.hub.get(session.id)?.state)) return;
     this.options.runs.type(session.token, session.queued.shift()!);
+    session.typed = this.clock.after(TAKEN_MS, () => {
+      // It never said it started: don't hold the rest up for good.
+      session.typed = null;
+      this.sendQueued(session);
+    });
+  }
+
+  /** The agent started on a prompt: the next instruction waits for the end of this turn. */
+  private taken(session: Session): void {
+    session.typed?.();
+    session.typed = null;
   }
 
   private now(): number {
@@ -378,6 +412,7 @@ export class ClaudeSource {
         token: null,
         waiting: false,
         queued: [],
+        typed: null,
       };
       this.sessions.set(id, session);
       this.put(id, cwd, false); // replies stay off until a managed run claims it
@@ -453,8 +488,11 @@ export class ClaudeSource {
             delete s.say; // the last report's words; new ones come from the transcript
           }
           if (s.say === WAITING_THERE) delete s.say;
+          if (session.queued.length > 0) s.say = waitingSay(session.queued);
           this.log(s, { verb: '你', target: firstLine(str(event.prompt) ?? '') });
         });
+        // Only now that it shows as working: before, the change above could let the next one go.
+        this.taken(session);
         return NO_DECISION;
       case 'PreToolUse':
         if (tool === 'AskUserQuestion') return this.holdQuestion(session, input, gone);
@@ -479,7 +517,7 @@ export class ClaudeSource {
         if (tool === 'AskUserQuestion') return NO_DECISION;
         return this.holdPermission(session, tool, input, cwd, gone, str(event.tool_use_id));
       case 'PostToolUse':
-        this.settled(session, tool, input, str(event.tool_use_id), cwd);
+        this.settled(session, tool, input, str(event.tool_use_id));
         this.change(id, (s) => {
           if (s.say === WAITING_THERE) delete s.say;
           if (tool === 'TodoWrite' || tool === 'AskUserQuestion') return;
@@ -489,7 +527,7 @@ export class ClaudeSource {
         });
         return NO_DECISION;
       case 'PostToolUseFailure':
-        this.settled(session, tool, input, str(event.tool_use_id), cwd);
+        this.settled(session, tool, input, str(event.tool_use_id));
         this.change(id, (s) => {
           if (s.say === WAITING_THERE) delete s.say;
           const full = this.tools.targetOf(tool, input, cwd);
@@ -618,16 +656,14 @@ export class ClaudeSource {
    * it in the terminal. Agents show their own prompt while the hook waits, so this is
    * normal; it backs up `gone` for agents that don't hang up on the hook.
    */
-  private settled(session: Session, tool: string, input: Record<string, unknown>, toolUseId: string | undefined, cwd: string | undefined): void {
+  private settled(session: Session, tool: string, input: Record<string, unknown>, toolUseId: string | undefined): void {
     // Only the very same call: with calls running side by side, another one of the same
-    // tool finishing says nothing about this one. Its id if both sides have one, else
-    // the same input, else the same thing to act on (Codex adds a description to the request).
-    const same = JSON.stringify(input);
-    const target = this.tools.targetOf(tool, input, cwd);
+    // tool finishing says nothing about this one, even on the same file. Its id if both
+    // sides have one, else the same input (less the reason Codex adds to the request).
+    const same = sameInput(input);
     const held =
       session.held.find((h) => toolUseId !== undefined && h.toolUseId === toolUseId) ??
-      session.held.find((h) => h.tool === tool && (h.toolUseId === undefined || toolUseId === undefined) && JSON.stringify(h.input) === same) ??
-      session.held.find((h) => h.tool === tool && (h.toolUseId === undefined || toolUseId === undefined) && target !== '' && this.tools.targetOf(h.tool, h.input, cwd) === target);
+      session.held.find((h) => h.tool === tool && (h.toolUseId === undefined || toolUseId === undefined) && sameInput(h.input) === same);
     if (held) this.release(session, held, ANSWERED_THERE);
   }
 
@@ -895,6 +931,7 @@ export class ClaudeSource {
   }
 
   private forget(id: string): void {
+    this.sessions.get(id)?.typed?.();
     this.sessions.delete(id);
     this.hub.remove(id);
   }

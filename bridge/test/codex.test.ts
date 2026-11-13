@@ -207,7 +207,7 @@ test('a managed Codex run: on the device before its first prompt, and its termin
   assert.ok(s.state === 'approve' && s.ask?.kind === 'approve');
   hub.act({ t: 'approve', seq: 2, id: ID, req: s.ask.req, allow: true });
   // Pressed only on this request's own prompt (its command on the screen), and done only once pressed.
-  assert.deepEqual(sent.at(-1), { t: 'press', id: 1, keys: 'y', expect: CODEX_KEYS.expect, needle: 'echo two >> note.txt' });
+  assert.deepEqual(sent.at(-1), { t: 'press', id: 1, keys: 'y', expect: CODEX_KEYS.expect, needle: 'echo two >> note.txt', whole: true });
   assert.equal(hub.get(ID)!.state, 'approve');
   await tick();
   assert.deepEqual([hub.get(ID)!.state, hub.get(ID)!.ask], ['running', undefined]);
@@ -242,9 +242,24 @@ test('a managed Codex run: on the device before its first prompt, and its termin
   assert.equal(typed(), before);
   assert.match(hub.get(ID)!.say ?? '', /做完这一轮再发/);
 
+  assert.equal(hub.act({ t: 'reply', seq: 6, id: ID, text: '再提交' }), null);
+  assert.match(hub.get(ID)!.say ?? '', /顺便跑下测试（后面还有 1 条）/);
+
+  // One per turn: the second waits until the agent has started on the first and finished it.
   await send('Stop', { last_assistant_message: '好了' });
   assert.deepEqual(sent.at(-1), { t: 'type', text: '顺便跑下测试' });
   assert.equal(typed(), before + 1);
+  hub.update(ID, (s) => {
+    s.say = '顺手改个说法'; // any change before the agent says it started
+  });
+  await send('UserPromptSubmit', { prompt: '顺便跑下测试' });
+  assert.equal(typed(), before + 1);
+  assert.match(hub.get(ID)!.say ?? '', /做完这一轮再发给它：再提交/);
+  await send('Stop', { last_assistant_message: '测试过了' });
+  assert.deepEqual(sent.at(-1), { t: 'type', text: '再提交' });
+  assert.equal(typed(), before + 2);
+  await send('UserPromptSubmit', { prompt: '再提交' });
+  await send('Stop', { last_assistant_message: '提交了' });
 
   // Codex exits: its session ends, then the terminal closes. The report stays until seen.
   await send('SessionEnd');

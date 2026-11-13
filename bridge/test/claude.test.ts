@@ -140,6 +140,19 @@ test('another call of the same tool finishing does not let go of a held one', as
   assert.equal(get().state, 'running');
 });
 
+test('another edit of the same file finishing does not let go of a held one', async () => {
+  const { send, get } = setup();
+  const file = 'D:\\work\\shop\\src\\cart.ts';
+  const a = send('PermissionRequest', { tool_name: 'Edit', tool_input: { file_path: file, old_string: 'a', new_string: 'b' } });
+  await settled(a);
+  await send('PostToolUse', { tool_name: 'Edit', tool_input: { file_path: file, old_string: 'x', new_string: 'y' }, tool_use_id: 'tu-b', tool_response: {} });
+  assert.equal(await settled(a), 'pending');
+  assert.equal(get().state, 'approve');
+  // The same input (keys in any order, the stated reason aside) is the same call.
+  await send('PostToolUse', { tool_name: 'Edit', tool_input: { new_string: 'b', old_string: 'a', file_path: file, description: '改' }, tool_response: {} });
+  assert.deepEqual(await a, { status: 200 });
+});
+
 test('the device leaving hands every held request back to the terminal', async () => {
   const { detach, send, get } = setup();
   const reply = send('PermissionRequest', edit);

@@ -139,3 +139,13 @@ node simulator/tools/snapshot.mjs out.png --pair --approve --relink 0 --tap 240,
 另外按审核建议加了：未认证的网络连接 6 分钟内没完成就断开（`link.ts` 的 `HANDSHAKE_MS`），同时最多 8 个（`server.ts` 的 `MAX_UNPROVEN`）。
 
 审核里提到、但这一轮没做的：C 端没有做 sanitizer 和 fuzz 测试；计划批准后进入的模式、用自己的话回答、多选答案格式，仍要在真 agent 上验证（排在最后一起做的真实测试里）。
+
+## 第二轮审核（Codex，11-14）和处理
+
+确认第一轮多数修复有效，另报 3 处，都已修：
+
+1. 高｜批准仍可能匹配到另一个请求（屏幕上是 `npm test && …`，或旧输出里有 `npm test`）。怎么改的：只看当前确认框（从 “Would you like to / Do you want to” 那行到选项），命令要和 `$ ` 那行（连同折行）整条相等；文件名要独立出现。找不到就交回电脑。见 `run.ts` 的 `promptShows`。真 agent 上的确认框格式（长命令、多行命令、改文件）放进最后的实测里核对。
+2. 中｜排队的指令会提前发送。怎么改的：打进去一条后，等 agent 报 `UserPromptSubmit`（它开始做了）才算这条送到，每轮结束只放一条；30 秒没回音就不再等。见 `source.ts` 的 `sendQueued`、`taken`。
+3. 中｜同一文件的另一次编辑会误释放请求。怎么改的：去掉按命令或文件名的兜底，只认调用 id 或完全相同的输入（不看 Codex 加的理由字段，键的顺序不算）。见 `source.ts` 的 `settled`、`sameInput`。
+
+用户的意见：这是可控内网里的自用工具，安全不再继续加固，后面把精力放在使用体验上。

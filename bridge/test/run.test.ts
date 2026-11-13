@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import { ClaudeSource } from '../src/claude/source.ts';
 import { realClock } from '../src/clock.ts';
 import { Hub } from '../src/hub.ts';
-import { asKeys, resolveCommand } from '../src/run.ts';
+import { asKeys, promptShows, resolveCommand } from '../src/run.ts';
 import { Runs, parseFromRun } from '../src/runs.ts';
 import { startServer } from '../src/server.ts';
 
@@ -28,6 +28,42 @@ async function until(what: string, ok: () => boolean, ms = 15000): Promise<void>
 test('instructions become one line of keystrokes', () => {
   assert.equal(asKeys('  跑一下测试 \n然后提交\n'), '跑一下测试 然后提交');
   assert.equal(asKeys('a\x1b[2Jb\x07'), 'a[2Jb');
+});
+
+test('a key is pressed only on the prompt for this very command or file', () => {
+  const expect = /Yes, proceed|Press enter to confirm/i;
+  const prompt = (cmd: string) =>
+    [
+      '• Ran npm test',
+      '  └ ok 12 tests',
+      '',
+      '  Would you like to run the following command?',
+      '',
+      '  Reason: 跑测试',
+      '',
+      cmd,
+      '',
+      '› 1. Yes, proceed (y)',
+      "  2. Yes, and don't ask again for commands that start with `npm test` (p)",
+      '  3. No, and tell Codex what to do differently (esc)',
+      '',
+      '  Press enter to confirm or esc to cancel',
+    ].join('\n');
+  const cmd = (text: string) => ({ text, whole: true });
+  assert.equal(promptShows(prompt('  $ npm test'), expect, cmd('npm test')), true);
+  // More than the command asked about: another request.
+  assert.equal(promptShows(prompt('  $ npm test && rm -rf .'), expect, cmd('npm test')), false);
+  // The command only in earlier output, or in a choice's words, doesn't count.
+  assert.equal(promptShows(prompt('  $ git push'), expect, cmd('npm test')), false);
+  // A long command wrapped onto the next lines.
+  assert.equal(promptShows(prompt('  $ node scripts/build.mjs --out dist\n    --minify --sourcemap'), expect, cmd('node scripts/build.mjs --out dist --minify --sourcemap')), true);
+  // No prompt head on the screen: can't tell which request it is.
+  assert.equal(promptShows('$ npm test\n1. Yes, proceed (y)', expect, cmd('npm test')), false);
+  // A file: its own name, not part of a longer one.
+  const edits = (path: string) => `Would you like to make the following edits?\n\n  └ ${path} (+3 -1)\n\n› 1. Yes, proceed (y)`;
+  assert.equal(promptShows(edits('src/app.ts'), expect, { text: 'app.ts', whole: false }), true);
+  assert.equal(promptShows(edits('src/webapp.ts'), expect, { text: 'app.ts', whole: false }), false);
+  assert.equal(promptShows(edits('src/app.tsx'), expect, { text: 'app.ts', whole: false }), false);
 });
 
 test('launchers must say hello with a run token', () => {
@@ -82,8 +118,8 @@ test('a managed run: the device types into the agent running in its terminal', {
     await new Promise((r) => setTimeout(r, 1200));
     assert.equal(screen.includes('got: 等会儿再说'), false);
     // A prompt is up, but for another command than the one the device answered: nothing is pressed.
-    assert.equal(await runs.press(token, 'y\r', 'Yes, proceed', 'rm -rf build'), false);
-    assert.equal(await runs.press(token, 'y\r', 'Yes, proceed', 'npm test'), true);
+    assert.equal(await runs.press(token, 'y\r', 'Yes, proceed', { text: 'rm -rf build', whole: true }), false);
+    assert.equal(await runs.press(token, 'y\r', 'Yes, proceed', { text: 'npm test', whole: true }), true);
     await until('the key to arrive', () => screen.includes('got: y'));
     await until('the waiting instruction, once the prompt is gone', () => screen.includes('got: 等会儿再说'));
 

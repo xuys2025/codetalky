@@ -26,17 +26,48 @@ const ENTER_DELAY_MS = 150;
 export const PROMPT_UP = /No, and tell \w+ what to do differently|Yes, proceed|Press enter to confirm/i;
 const PROMPT_POLL_MS = 400;
 
+/** The first line of an agent's permission prompt ("Would you like to run the following command?"). */
+const PROMPT_HEAD = /Would you like to|Do you want to/i;
+/** One of the prompt's numbered choices. */
+const PROMPT_CHOICE = /^\s*[›>❯]?\s*\d+\.\s/;
+
+/** What a press is for: the command (whole: all of it, nothing more), or the file's name. */
+export interface Needle {
+  text: string;
+  whole: boolean;
+}
+
 /**
- * The screen shows the agent's prompt (expect) for this very request (needle: its
- * command or file). Whitespace is ignored because the terminal wraps long lines. A
- * prompt for another request, or the words alone in some output, doesn't count.
+ * The screen shows the agent's prompt (expect) for this very request. Only the prompt
+ * itself is looked at: from its first line down to the last line matching expect.
+ * A command must be the whole command on its "$ " line (and the lines it wraps
+ * onto), so "npm test && rm -rf ." isn't taken for "npm test"; a file must be there
+ * by its own name. When that can't be made out, nothing is pressed.
  */
-export function promptShows(screen: string, expect: RegExp, needle: string | undefined): boolean {
-  if (!expect.test(screen)) return false;
+export function promptShows(screen: string, expect: RegExp, needle: Needle | undefined): boolean {
+  const lines = screen.split('\n').map((line) => line.replace(/[│┃╭╮╰╯─]/g, ' ').trimEnd());
+  let end = lines.length - 1;
+  while (end >= 0 && !expect.test(lines[end]!)) end--;
+  if (end < 0) return false;
   if (needle === undefined) return true;
+  let start = end;
+  while (start >= 0 && !PROMPT_HEAD.test(lines[start]!)) start--;
+  if (start < 0) return false;
+  const prompt = lines.slice(start, end + 1);
   const squash = (s: string) => s.replace(/\s+/g, '');
-  const want = squash(needle);
-  return want !== '' && squash(screen).includes(want);
+  if (needle.whole) {
+    const want = squash(needle.text);
+    for (let i = 0; i < prompt.length; i++) {
+      const first = /^\s*\$ (.*)$/.exec(prompt[i]!);
+      if (!first) continue;
+      let shown = first[1]!;
+      for (let j = i + 1; j < prompt.length && prompt[j]!.trim() !== '' && !PROMPT_CHOICE.test(prompt[j]!); j++) shown += prompt[j];
+      if (want !== '' && squash(shown) === want) return true;
+    }
+    return false;
+  }
+  const name = needle.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return name !== '' && prompt.some((line) => new RegExp(`(^|[\\s/\\\\'"\`(])${name}($|[\\s'"\`):,])`).test(line));
 }
 
 /** Find a command on PATH. npm's .cmd shims on Windows are followed to the program they start. */
@@ -128,7 +159,7 @@ export function runManaged(o: RunOptions): Promise<number> {
         ready(lines.join('\n'));
       }),
     );
-  const press = async (keys: string, expect: string, needle: string | undefined): Promise<boolean> => {
+  const press = async (keys: string, expect: string, needle: Needle | undefined): Promise<boolean> => {
     let pattern: RegExp;
     try {
       pattern = new RegExp(expect, 'i');
@@ -173,7 +204,8 @@ export function runManaged(o: RunOptions): Promise<number> {
         return;
       }
       if (msg.t === 'press' && typeof msg.keys === 'string' && typeof msg.expect === 'string') {
-        void press(msg.keys, msg.expect, typeof msg.needle === 'string' ? msg.needle : undefined).then((ok) => {
+        const needle = typeof msg.needle === 'string' ? { text: msg.needle, whole: msg.whole === true } : undefined;
+        void press(msg.keys, msg.expect, needle).then((ok) => {
           if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: 'pressed', id: msg.id, ok } satisfies FromRun));
         });
         return;
