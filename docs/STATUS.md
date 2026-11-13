@@ -65,7 +65,7 @@
 - `tools/fontpack/`：字库生成工具。更纱黑体常规 18、20 号，粗体 20、24 号，各 3902 个字，加四套 JetBrains Mono，位图合计 1.48 MB。字形先按黑白方式对齐像素格再平滑，存成每像素 2 位，黑白和灰度两遍刷新共用。
 - `simulator/`：两遍刷新已接上，先黑白，页面停 0.45 秒后叠加灰度；右侧有开关可以关掉灰度对比。耗时和残影仍是占位参数。
 - `design/renders/ui-*.png`：13 张界面在仿真器里的真实渲染（纯黑白那一遍），数据来自假 agent，用 `simulator/tools/render-ui.sh` 重出。
-- `bridge/`：电脑端服务能跑，现在的数据来自假 agent，见下面“第 5 项”。`firmware/`：空。
+- `bridge/`：电脑端服务能跑。数据来自真的 Claude Code（经钩子，见“第 7 项”），加 `--fake` 再加六个演示会话。`firmware/`：空。
 - 已知不足：见“明天从这里开始”第 6 项。
 - WSL 里装了 Emscripten 7.0.0（`~/emsdk`）。WSL 直连 GitHub 不通，要走 Windows 上的代理，见 README。
 
@@ -109,6 +109,53 @@
 - `ct_hal_net_send()`、`ct_hal_battery_percent()` 两个函数；收到的消息要在界面线程里交给 `ct_ui_on_message()`；cJSON 用 ESP-IDF 自带的同一个版本；会话内存走 `malloc`，要开 PSRAM 分配。
 - 屏幕驱动要比较新旧两帧，只刷有变化的区域，灰度叠加只补重画过的像素，规则和 `simulator/web/sim.js` 开头的说明一样。不这样做，每分钟的时钟重画都会整屏重新驱动，费电，灰度像素被重复叠加还会越来越深。
 
+## 第 7 项：接 Claude Code 钩子（已完成）
+
+真的 Claude Code 会话现在会出现在设备上，能在设备上批准、拒绝、回答它的提问。
+
+怎么用：
+
+```sh
+cd bridge
+node src/main.ts hooks --merge ~/.claude/settings.json   # 加钩子，旧文件留 .codetalky.bak
+node src/main.ts --fake                                  # 起服务（--fake 可省）
+node src/main.ts hooks --remove ~/.claude/settings.json  # 不用了就撤掉
+```
+
+钩子是 Claude Code 自带的 HTTP 钩子，发到 `http://127.0.0.1:8137/hooks/claude`。服务没开时 Claude Code 照常工作，钩子连不上不会拦它。我没有改你的 `~/.claude/settings.json`，要不要加由你决定。
+
+怎么工作的（`bridge/src/claude/`）：
+
+- 一个 Claude Code 会话对应设备上一行，名字是项目文件夹名；模型名和 git 分支从会话记录里读，读不到就显示“—”。
+- 你每发一条指令开始新的一轮：计数、改动文件、改动片段清零；活动记录保留。
+- 每一步工具调用记一条：读了多少行、搜到几处、改了几行（用 Claude Code 自己的补丁，改动片段带真实行号）、命令完成或失败。待办列表来自它的 TodoWrite。
+- 完成汇报用它最后一段回复，Markdown 的要点、加粗开头会变成汇报里的圆点和粗体。
+- 批准请求：设备连着时，钩子等设备回话，期限默认 570 秒（`--hold` 可改）。期限到了、设备断了、或者根本没设备连着，钩子不给结论，Claude Code 就在终端里照常问你。注意：钩子在等设备的时候，终端里看不到确认框。
+- 改文件的请求在设备上显示要改的行，会去文件里找出第几行；命令显示整条，理由用命令自带的说明。删除、推送、强推、`reset --hard` 这类命令要长按批准。
+- 同时来的几个请求排队，一个一个显示。
+- 它用 AskUserQuestion 提问时，在设备上点选项回答；一次问几道题就依次显示。
+- 一次性运行（`claude -p`）一结束会话就关了，汇报会留着，你点“知道了”才移走；正常退出的会话直接移走；12 小时没动静的会话也会清掉。
+- 普通终端里开的会话不能从设备发新指令（设备上显示“只能查看”），要等“托管终端”。
+
+实测过（用最便宜的 haiku 模型，在临时目录里跑，三次一共约 0.01 美元）：
+
+- `claude -p` 让它跑一条命令：设备上出现等批准，点批准后命令真的执行了。
+- `claude -p` 让它改一个文件：设备上看到要改的行，批准后改动片段和 Claude Code 的补丁一致，完成汇报的要点正确。
+- 交互式 Claude Code（用 pywinpty 开的伪终端）让它用 AskUserQuestion 提问：设备上点了选项，终端里显示收到了答案，它的回复里说的就是这个选项。`claude -p` 模式里没有 AskUserQuestion，只能这样测。
+
+安全：
+
+- 钩子入口只接受本机发来、并且不带 Origin 头的请求，网页伪造不了。
+- 设备从别的机器连进来一律拒绝，等配对口令做好再放开；早期接真机调试可以加 `--insecure-lan`（会打印警告）。
+
+还没做的：
+
+- 给普通终端里的会话发新指令：要做托管终端（`codetalky claude` 在伪终端里启动 Claude Code，设备的指令写进去）。这次测试证明 pywinpty（Windows 的 ConPTY）在这台机器上能用。
+- 计划确认（ExitPlanMode）还是在终端里确认，设备上不显示计划。
+- 多选题在设备上只能选一个；不能自己写答案。
+- Codex 还没接。
+- 配对口令。
+
 ## 明天从这里开始
 
 0. （11-14 已做）触摸交互已补进设计稿，共九张，等你看。做法：
@@ -132,8 +179,10 @@
    - 完成汇报太长时还不能翻页。
    - 超出常用 3755 字的汉字会显示成方框；真 agent 的输出什么字都有，要想办法（按需补字或显示替代符号）。
    - 语音确认里的文字是写死的（第 3 阶段接豆包后才有真的）。
-7. 接 Claude Code 的钩子，跑通真实的批准闭环（第 2 阶段）。
+7. （已做）接 Claude Code 的钩子，跑通真实的批准闭环（第 2 阶段）。
 8. 在 WSL 里装 ESP-IDF v5.5.4，确认官方固件能原样编译。
+9. 托管终端：`codetalky claude` / `codetalky codex` 在伪终端里启动 agent，设备发的指令写进去（Windows 用 ConPTY）。
+10. 接 Codex（`~/.codex/hooks.json`，先核对它的记录格式和钩子事件）。
 
 ## 常用命令
 
@@ -142,6 +191,8 @@
 bash simulator/build.sh
 # 启动电脑端服务和假 agent（同时提供仿真器页面），然后打开 http://127.0.0.1:8137
 cd bridge && npm run demo
+# 让 Claude Code 把事件发给电脑端服务（撤掉用 --remove）
+cd bridge && node src/main.ts hooks --merge ~/.claude/settings.json
 # 电脑端的类型检查和测试
 cd bridge && npm run check && npm test
 # 不开浏览器，按真机像素出全部界面图

@@ -61,6 +61,7 @@ function demo() {
   const hub = new Hub(clock);
   const changes: string[] = [];
   hub.subscribe((e) => {
+    if (e.type === 'devices') return;
     const s = hub.get(e.id);
     if (s) checkSnapshot(s);
     changes.push(e.id);

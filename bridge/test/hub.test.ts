@@ -108,7 +108,7 @@ test('seen turns done into idle', () => {
 test('subscribers hear about changes and removals', () => {
   const { hub } = setup();
   const events: string[] = [];
-  const off = hub.subscribe((e) => events.push(`${e.type} ${e.id}`));
+  const off = hub.subscribe((e) => events.push(e.type === 'devices' ? e.type : `${e.type} ${e.id}`));
   hub.update('s1', (s) => {
     s.say = 'hi';
   });
@@ -116,6 +116,18 @@ test('subscribers hear about changes and removals', () => {
   off();
   hub.put(snapshot({ id: 's2' }), {});
   assert.deepEqual(events, ['changed s1', 'removed s1']);
+});
+
+test('the hub counts devices that are connected', () => {
+  const { hub } = setup();
+  const detachA = hub.attachDevice();
+  const detachB = hub.attachDevice();
+  assert.equal(hub.devices(), 2);
+  detachA();
+  detachA();
+  assert.equal(hub.devices(), 1);
+  detachB();
+  assert.equal(hub.devices(), 0);
 });
 
 test('ids longer than the device can hold are refused', () => {

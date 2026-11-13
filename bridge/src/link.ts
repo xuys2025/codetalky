@@ -40,6 +40,7 @@ export class DeviceLink {
   private readonly dirty = new Set<string>();
   private cancelFlush: (() => void) | null = null;
   private unsubscribe: (() => void) | null = null;
+  private detach: (() => void) | null = null;
   private closed = false;
 
   constructor(hub: Hub, clock: Clock, send: (text: string) => void, options: LinkOptions) {
@@ -71,6 +72,7 @@ export class DeviceLink {
   close(): void {
     this.closed = true;
     this.unsubscribe?.();
+    this.detach?.();
     this.cancelFlush?.();
     this.cancelFlush = null;
   }
@@ -86,7 +88,9 @@ export class DeviceLink {
     });
     for (const snapshot of this.hub.list()) this.send({ t: 'session', s: forDevice(snapshot) });
     this.send({ t: 'ready' });
+    this.detach ??= this.hub.attachDevice();
     this.unsubscribe ??= this.hub.subscribe((event) => {
+      if (event.type === 'devices') return;
       this.dirty.add(event.id);
       this.cancelFlush ??= this.clock.after(this.options.flushMs, () => this.flush());
     });

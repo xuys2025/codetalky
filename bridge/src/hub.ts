@@ -15,7 +15,7 @@ export interface SessionControl {
   reply?(text: string): void;
 }
 
-export type HubEvent = { type: 'changed'; id: string } | { type: 'removed'; id: string };
+export type HubEvent = { type: 'changed'; id: string } | { type: 'removed'; id: string } | { type: 'devices' };
 
 interface Entry {
   snapshot: SessionSnapshot;
@@ -26,6 +26,7 @@ export class Hub {
   private readonly clock: Clock;
   private readonly entries = new Map<string, Entry>();
   private readonly listeners = new Set<(event: HubEvent) => void>();
+  private deviceCount = 0;
 
   constructor(clock: Clock) {
     this.clock = clock;
@@ -63,6 +64,24 @@ export class Hub {
 
   list(): SessionSnapshot[] {
     return [...this.entries.values()].map((entry) => entry.snapshot);
+  }
+
+  /** Devices that have said hello and are still connected. */
+  devices(): number {
+    return this.deviceCount;
+  }
+
+  /** A device finished its hello. Call the returned function when it leaves. */
+  attachDevice(): () => void {
+    this.deviceCount++;
+    this.emit({ type: 'devices' });
+    let attached = true;
+    return () => {
+      if (!attached) return;
+      attached = false;
+      this.deviceCount--;
+      this.emit({ type: 'devices' });
+    };
   }
 
   subscribe(listener: (event: HubEvent) => void): () => void {

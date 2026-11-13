@@ -11,13 +11,26 @@ import type { Clock } from './clock.ts';
 import type { Hub } from './hub.ts';
 import { DeviceLink, type LinkOptions } from './link.ts';
 
+/** Answer to a POST from an agent hook. */
+export interface PostReply {
+  status: number;
+  body?: unknown;
+}
+
 export interface ServerOptions extends LinkOptions {
   host: string;
   port: number;
   /** Directory of the browser simulator to serve at /, or null. */
   simDir: string | null;
+  /** JSON POST endpoints for agent hooks, by path. Only reachable from this machine. */
+  post?: Record<string, (body: unknown) => Promise<PostReply>>;
+  /** Let devices connect from other machines. There is no pairing yet, so off by default. */
+  allowRemoteDevices?: boolean;
   log: (line: string) => void;
 }
+
+/** Hook payloads carry whole tool inputs (a Write can hold a large file). */
+const MAX_POST = 8 * 1024 * 1024;
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -78,6 +91,60 @@ function originAllowed(req: IncomingMessage): boolean {
   }
 }
 
+function isLoopback(req: IncomingMessage): boolean {
+  const addr = req.socket.remoteAddress ?? '';
+  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+}
+
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
+  const text = body === undefined ? '' : JSON.stringify(body);
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(text) });
+  res.end(text);
+}
+
+/**
+ * Agent hooks run on this machine and never send Origin. Refusing anything else keeps
+ * web pages (which always send Origin) and other machines on the network out.
+ */
+function handlePost(
+  handler: (body: unknown) => Promise<PostReply>,
+  req: IncomingMessage,
+  res: ServerResponse,
+  log: (line: string) => void,
+): void {
+  if (!isLoopback(req) || req.headers.origin !== undefined) {
+    sendJson(res, 403, { error: 'forbidden' });
+    req.resume();
+    return;
+  }
+  const chunks: Buffer[] = [];
+  let size = 0;
+  let tooBig = false;
+  req.on('data', (chunk: Buffer) => {
+    size += chunk.length;
+    if (size > MAX_POST) tooBig = true;
+    else chunks.push(chunk);
+  });
+  req.on('end', () => {
+    if (tooBig) return sendJson(res, 413, { error: 'too large' });
+    let body: unknown;
+    try {
+      body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    } catch {
+      return sendJson(res, 400, { error: 'bad json' });
+    }
+    handler(body).then(
+      (reply) => {
+        if (!res.destroyed) sendJson(res, reply.status, reply.body);
+      },
+      (err: unknown) => {
+        log(`hook handler failed: ${(err as Error).message}`);
+        if (!res.destroyed) sendJson(res, 500, { error: 'internal' });
+      },
+    );
+  });
+}
+
 export interface RunningServer {
   port: number;
   close(): Promise<void>;
@@ -86,6 +153,12 @@ export interface RunningServer {
 export function startServer(hub: Hub, clock: Clock, options: ServerOptions): Promise<RunningServer> {
   const simRoot = options.simDir === null ? null : resolve(options.simDir);
   const http: Server = createServer((req, res) => {
+    const path = new URL(req.url ?? '/', 'http://x').pathname;
+    const post = options.post?.[path];
+    if (post && req.method === 'POST') {
+      handlePost(post, req, res, options.log);
+      return;
+    }
     if (simRoot === null) {
       res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
       res.end('CodeTalky bridge');
@@ -97,7 +170,9 @@ export function startServer(hub: Hub, clock: Clock, options: ServerOptions): Pro
   const sockets = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
   http.on('upgrade', (req, socket, head) => {
     const path = new URL(req.url ?? '/', 'http://x').pathname;
-    if (path !== '/device' || !originAllowed(req)) {
+    const remoteRefused = !isLoopback(req) && !options.allowRemoteDevices;
+    if (path !== '/device' || !originAllowed(req) || remoteRefused) {
+      if (remoteRefused) options.log(`refused a device from ${req.socket.remoteAddress ?? '?'}: no pairing yet (see --insecure-lan)`);
       socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       socket.destroy();
       return;

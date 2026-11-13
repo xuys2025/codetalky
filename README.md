@@ -49,11 +49,23 @@ node simulator/tools/snapshot.mjs out.png --tap 240,248 --hold 360,756 --ms 5000
 bash simulator/tools/render-ui.sh   # 全部界面，输出到 design/renders/ui-*.png
 ```
 
+## 接 Claude Code
+
+让 Claude Code 把事件发给电脑端服务（加到你的用户设置里，旧文件会留一份 `.codetalky.bak`）：
+
+```sh
+cd bridge
+node src/main.ts hooks --merge ~/.claude/settings.json
+node src/main.ts            # 起服务；加 --fake 可以同时看演示会话
+```
+
+之后在任何终端里开的 Claude Code 会话都会出现在设备上，批准请求和它的提问可以在设备上回答。设备没连上或期限内没回话时，Claude Code 照常在终端里问你。不用了就 `node src/main.ts hooks --remove ~/.claude/settings.json`。细节见 `docs/STATUS.md` 的“第 7 项”。
+
 ## 现状
 
 第 1 阶段（设计与骨架）进行中。硬件未到货，开发都在仿真器上做。
 
-- 已有：九个触摸界面（`ui/src/ct_ui.c`），数据从电脑端服务经 WebSocket 收来；电脑端服务（`bridge/`）和按剧本走的假 agent；字库生成工具；仿真器（先黑白、停下后叠加灰度的两遍刷新，参数是占位值）；无浏览器截图工具。
-- 还没有：接真的 Claude Code 和 Codex（钩子、托管终端）、语音、固件工程。
+- 已有：九个触摸界面（`ui/src/ct_ui.c`），数据从电脑端服务经 WebSocket 收来；电脑端服务（`bridge/`），接了 Claude Code 的钩子，还有按剧本走的假 agent；字库生成工具；仿真器（只刷有变化的像素，先黑白、停下后叠加灰度，参数是占位值）；无浏览器截图工具。
+- 还没有：从设备给普通终端里的会话发新指令（托管终端）、Codex、语音、配对口令、固件工程。
 
 进度和结论见 `docs/STATUS.md`。
