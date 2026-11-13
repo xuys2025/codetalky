@@ -19,6 +19,7 @@ import { fastClock, realClock } from './clock.ts';
 import { FakeAgent } from './fake/engine.ts';
 import { demoScripts } from './fake/scenario.ts';
 import { Hub } from './hub.ts';
+import { Glyphs } from './glyphs.ts';
 import { bridgeId, defaultName } from './identity.ts';
 import { DEFAULT_QUICK } from './link.ts';
 import { startServer } from './server.ts';
@@ -129,6 +130,7 @@ function serve(o: ServeOptions): void {
   const scripts = o.fake === null ? [] : demoScripts().filter((s) => o.fake!.length === 0 || o.fake!.includes(s.initial(0).id));
   const agents = scripts.map((script) => new FakeAgent(hub, demoClock, script));
   const simDir = o.sim ? fileURLToPath(new URL('../../simulator/web/', import.meta.url)) : null;
+  const glyphs = Glyphs.load();
 
   startServer(hub, realClock, {
     host: o.host,
@@ -139,6 +141,7 @@ function serve(o: ServeOptions): void {
     hostName: o.name,
     hostId: bridgeId(o.port),
     quick: DEFAULT_QUICK,
+    fixText: glyphs.fix.bind(glyphs),
     tzMinutes: -new Date().getTimezoneOffset(),
     flushMs: 150,
     log,

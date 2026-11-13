@@ -14,6 +14,7 @@
 //   --offline    don't connect to the bridge (must come first)
 //   --hosts 2    two computers, 台式机 and 笔记本, three demo sessions each
 //   --unlink N   computer N (0 or 1) drops off the network
+//   --long-report  make the api-server report too long for one screen
 //   --verbose    print the frames sent by the device
 //
 // Actions run in the order given; 300 ms pass after each one.
@@ -25,6 +26,7 @@ import { ManualClock } from '../../bridge/src/clock.ts';
 import { FakeAgent } from '../../bridge/src/fake/engine.ts';
 import { DEMO_T0, demoScripts } from '../../bridge/src/fake/scenario.ts';
 import { Hub } from '../../bridge/src/hub.ts';
+import { Glyphs } from '../../bridge/src/glyphs.ts';
 import { DEFAULT_QUICK, DeviceLink } from '../../bridge/src/link.ts';
 
 const require = createRequire(import.meta.url);
@@ -40,20 +42,27 @@ const verbose = args.includes('--verbose');
 const hostsAt = args.indexOf('--hosts');
 const twoHosts = hostsAt >= 0 && args[hostsAt + 1] === '2';
 const actions = args.filter(
-  (a, i) => a !== '--offline' && a !== '--verbose' && !(hostsAt >= 0 && (i === hostsAt || i === hostsAt + 1)),
+  (a, i) => a !== '--offline' && a !== '--verbose' && a !== '--long-report' && !(hostsAt >= 0 && (i === hostsAt || i === hostsAt + 1)),
 );
 
 // ---- bridges, in process: one per computer ----
 const clock = new ManualClock(DEMO_T0 * 1000);
+const glyphs = Glyphs.load();
 const COMPUTERS = twoHosts
   ? [
       { name: '台式机', sessions: ['codetalky', 'firmware', 'docs-site'] },
       { name: '笔记本', sessions: ['blog-engine', 'landing', 'api-server'] },
     ]
   : [{ name: '台式机', sessions: null }];
+const longReport = args.includes('--long-report');
 const bridges = COMPUTERS.map((computer, index) => {
   const hub = new Hub(clock);
   for (const script of demoScripts()) {
+    if (longReport && script.initial(0).id === 'api-server') {
+      // A report too long for one screen, to check paging.
+      const report = script.steps[0].report;
+      for (let i = 1; i <= 14; i++) report.push({ b: true, lead: `第 ${i} 条`, text: '：补充说明，用来把汇报撑到一屏放不下，检查翻页是否正常。' });
+    }
     if (!computer.sessions || computer.sessions.includes(script.initial(0).id)) new FakeAgent(hub, clock, script);
   }
   return { ...computer, index, hub, link: null, toDevice: [], toBridge: [] };
@@ -116,6 +125,7 @@ if (!offline) {
       hostName: b.name,
       hostId: `demo-${b.index}`,
       quick: DEFAULT_QUICK,
+      fixText: (text) => glyphs.fix(text),
       tzMinutes: 480,
       flushMs: 150,
     });

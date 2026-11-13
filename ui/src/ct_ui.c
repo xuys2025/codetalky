@@ -41,6 +41,8 @@ typedef enum {
     SCR_DONE,
     SCR_REPLY,
     SCR_VOICE,
+    SCR_ENTRY, /* one activity entry in full */
+    SCR_DIFF,  /* the whole change a permission request would make */
 } screen_id_t;
 
 static screen_id_t s_screen = SCR_NONE;
@@ -103,6 +105,19 @@ static void show_question(void);
 static void show_done(void);
 static void show_reply(void);
 static void show_voice(void);
+static void show_entry(void);
+static void show_diff(void);
+
+/* The activity entry on the entry screen. Entries have no id and the log shifts as
+ * new ones arrive, so it is found again by its time, verb and target. */
+static struct {
+    int64_t at;
+    char verb[24];
+    char target[96];
+    int from_page; /* activity page to go back to */
+} s_entry;
+
+static int s_done_pages = 1; /* pages of the report on the done screen */
 
 /* ---------- state ---------- */
 
@@ -656,7 +671,23 @@ static void on_go_session(lv_event_t *e) {
     }
 }
 
-static void activity_row(lv_obj_t *parent, const ct_log_t *a, int height, bool tappable) {
+static void on_entry(lv_event_t *e) {
+    const ct_session_t *s = current();
+    const int index = (int)(intptr_t)lv_event_get_user_data(e);
+    if (s == NULL || index < 0 || index >= s->log_count) {
+        return;
+    }
+    const ct_log_t *a = &s->log[index];
+    s_entry.at = a->at;
+    snprintf(s_entry.verb, sizeof(s_entry.verb), "%s", a->verb);
+    snprintf(s_entry.target, sizeof(s_entry.target), "%s", a->target);
+    s_entry.from_page = s_page;
+    show_entry();
+}
+
+/* A log row. index >= 0 makes it tappable, opening that entry. */
+static void activity_row(lv_obj_t *parent, const ct_log_t *a, int height, int index) {
+    const bool tappable = index >= 0;
     lv_obj_t *row = ct_row(parent, height, tappable ? CT_PAD : 0, 8);
     char buf[32];
     ct_fmt_clock(buf, sizeof(buf), a->at);
@@ -678,7 +709,7 @@ static void activity_row(lv_obj_t *parent, const ct_log_t *a, int height, bool t
     if (tappable) {
         ct_border(row, 1, LV_BORDER_SIDE_BOTTOM);
         ct_label(row, MB24, "›");
-        ct_tappable(row, NULL, NULL);
+        ct_tappable(row, on_entry, (void *)(intptr_t)index);
     }
 }
 
@@ -760,7 +791,7 @@ static void detail_overview(lv_obj_t *screen, const ct_session_t *s) {
         lv_obj_t *recent = ct_col(content, 0, 2);
         const int shown = s->todo_count > 4 ? 2 : 3;
         for (int i = 0; i < shown && i < s->log_count; i++) {
-            activity_row(recent, &s->log[i], 28, false);
+            activity_row(recent, &s->log[i], 28, -1);
         }
     }
 }
@@ -773,7 +804,31 @@ static void detail_activity(lv_obj_t *screen, const ct_session_t *s) {
     }
     const int first = s_page * ACTIVITY_ROWS;
     for (int i = first; i < s->log_count && i < first + ACTIVITY_ROWS; i++) {
-        activity_row(content, &s->log[i], 48, true);
+        activity_row(content, &s->log[i], 48, i);
+    }
+}
+
+/* Index of the first hunk in a file, or -1. Hunks name files by path, the log by basename. */
+static int first_hunk_of(const ct_session_t *s, const char *path) {
+    for (int i = 0; i < s->hunk_count; i++) {
+        if (strcmp(s->hunks[i].file, path) == 0 || strcmp(ct_basename(s->hunks[i].file), path) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Tapping a file in the changes tab shows its first hunk. */
+static void on_file(lv_event_t *e) {
+    const ct_session_t *s = current();
+    const int index = (int)(intptr_t)lv_event_get_user_data(e);
+    if (s == NULL || index < 0 || index >= s->file_count) {
+        return;
+    }
+    const int hunk = first_hunk_of(s, s->files[index].path);
+    if (hunk >= 0 && hunk != s_page) {
+        s_page = hunk;
+        show_detail();
     }
 }
 
@@ -798,7 +853,7 @@ static void detail_changes(lv_obj_t *screen, const ct_session_t *s) {
         ct_label_fill(row, M20, f->path);
         ct_fmt_stat(buf, sizeof(buf), f->add, f->del);
         ct_label(row, MB20, buf);
-        ct_tappable(row, NULL, NULL);
+        ct_tappable(row, on_file, (void *)(intptr_t)i);
     }
     if (s->file_count > rows) {
         lv_obj_t *more = ct_row(content, 32, CT_PAD, 8);
@@ -868,6 +923,115 @@ static void show_detail(void) {
     present(screen, SCR_DETAIL);
 }
 
+/* ---------- one activity entry ---------- */
+
+static const ct_log_t *find_entry(const ct_session_t *s) {
+    for (int i = 0; i < s->log_count; i++) {
+        const ct_log_t *a = &s->log[i];
+        if (a->at == s_entry.at && strcmp(a->verb, s_entry.verb) == 0 &&
+            strncmp(a->target, s_entry.target, sizeof(s_entry.target) - 1) == 0) {
+            return a;
+        }
+    }
+    return NULL;
+}
+
+/* The log keeps only a file's name; the file list has its path. */
+static const char *full_path(const ct_session_t *s, const char *name) {
+    for (int i = 0; i < s->file_count; i++) {
+        if (strcmp(ct_basename(s->files[i].path), name) == 0) {
+            return s->files[i].path;
+        }
+    }
+    return name;
+}
+
+static void on_back_entry(lv_event_t *e) {
+    (void)e;
+    s_tab = 1;
+    s_page = s_entry.from_page;
+    show_detail();
+}
+
+static void on_entry_changes(lv_event_t *e) {
+    (void)e;
+    const ct_session_t *s = current();
+    if (s == NULL) {
+        return;
+    }
+    const int hunk = first_hunk_of(s, s_entry.target);
+    s_tab = 2;
+    s_page = hunk > 0 ? hunk : 0;
+    show_detail();
+}
+
+static void show_entry(void) {
+    const ct_session_t *s = current();
+    if (s == NULL) {
+        session_gone();
+        return;
+    }
+    const ct_log_t *a = find_entry(s);
+    if (a == NULL) {
+        /* It scrolled out of the log the bridge keeps. */
+        on_back_entry(NULL);
+        return;
+    }
+    lv_obj_t *screen = ct_screen_new();
+    header(screen, s, on_back_entry);
+    char clock[8], buf[96], result[48];
+    ct_fmt_clock(clock, sizeof(clock), a->at);
+    snprintf(buf, sizeof(buf), "%s · %s", clock, a->verb);
+    if (a->has_stat) {
+        ct_fmt_stat(result, sizeof(result), a->add, a->del);
+    } else {
+        snprintf(result, sizeof(result), "%s", a->res != NULL ? a->res : "");
+    }
+    ct_meta(screen, buf, result[0] != '\0' ? result : NULL);
+
+    lv_obj_t *content = ct_content(screen, CT_PAD);
+    lv_obj_set_style_pad_row(content, 8, 0);
+    lv_obj_set_style_pad_top(content, 10, 0);
+
+    const bool said = strcmp(a->verb, "说") == 0;
+    const bool you = strcmp(a->verb, "你") == 0 || strcmp(a->verb, "答") == 0;
+    const int hunk = first_hunk_of(s, a->target);
+    if (said || you) {
+        ct_section(content, said ? "它说" : (strcmp(a->verb, "答") == 0 ? "你选了" : "你说"));
+        ct_paragraph(content, F20, a->target);
+    } else {
+        const bool file = strcmp(a->verb, "Read") == 0 || strcmp(a->verb, "Edit") == 0 || strcmp(a->verb, "Write") == 0;
+        ct_section(content, file ? "文件" : "内容");
+        ct_paragraph(content, M20, file ? full_path(s, a->target) : a->target);
+    }
+    if (result[0] != '\0') {
+        ct_section(content, "结果");
+        lv_obj_t *row = ct_row(content, 32, 0, 8);
+        if (a->bad) {
+            ct_chip(row, result, true, false);
+            ct_label(row, F20, "没成功");
+        } else {
+            ct_label(row, MB20, result);
+        }
+    }
+    if (hunk >= 0) {
+        const ct_hunk_t *h = &s->hunks[hunk];
+        snprintf(buf, sizeof(buf), "改动 · 第 %d 行", h->line);
+        ct_section(content, buf);
+        lv_obj_t *box = ct_diff_box(content);
+        for (int i = 0; i < h->line_count; i++) {
+            ct_diff_add(box, h->lines[i][0], h->lines[i][0] != '\0' ? h->lines[i] + 1 : "");
+        }
+    }
+
+    lv_obj_t *bar = ct_bottom_bar(screen, 76);
+    ct_spacer(bar);
+    if (hunk >= 0) {
+        ct_button(bar, "看这个文件的改动", B20, 200, 56, false, on_entry_changes, NULL);
+    }
+    present(screen, SCR_ENTRY);
+}
+
 /* ---------- approve ---------- */
 
 static void decide(bool allow) {
@@ -893,6 +1057,37 @@ static void on_approve_short(lv_event_t *e) {
 static void on_deny(lv_event_t *e) {
     (void)e;
     decide(false);
+}
+
+static void on_full_diff(lv_event_t *e) {
+    (void)e;
+    show_diff();
+}
+
+/* The deadline or risk hint, then 拒绝 and 批准 (a long press for risky requests). */
+static void approve_bar(lv_obj_t *screen, const ct_ask_t *ask) {
+    lv_obj_t *hint = ct_row(screen, 32, CT_PAD, 0);
+    if (ask->risky) {
+        ct_label(hint, F18, "有风险的操作，要长按“批准”才生效");
+    } else if (ask->until > 0) {
+        char clock[8], buf[64];
+        ct_fmt_clock(clock, sizeof(clock), ask->until);
+        snprintf(buf, sizeof(buf), "%s 前没批准，就要回电脑确认", clock);
+        ct_label(hint, F18, buf);
+    }
+    lv_obj_t *bar = ct_bottom_bar(screen, 88);
+    lv_obj_set_style_pad_column(bar, 12, 0);
+    lv_obj_t *deny = ct_button(bar, "拒绝", B24, 100, 64, false, on_deny, NULL);
+    lv_obj_set_flex_grow(deny, 1);
+    if (ask->risky) {
+        lv_obj_t *ok = ct_button(bar, "长按批准", B24, 100, 64, true, NULL, NULL);
+        lv_obj_add_event_cb(ok, on_approve_long, LV_EVENT_LONG_PRESSED, NULL);
+        lv_obj_add_event_cb(ok, on_approve_short, LV_EVENT_SHORT_CLICKED, NULL);
+        lv_obj_set_flex_grow(ok, 1);
+    } else {
+        lv_obj_t *ok = ct_button(bar, "批准", B24, 100, 64, true, on_approve, NULL);
+        lv_obj_set_flex_grow(ok, 1);
+    }
 }
 
 static const char *approve_title(const char *verb) {
@@ -953,7 +1148,7 @@ static void show_approve(void) {
         snprintf(buf, sizeof(buf), ask->line > 0 ? "看完整改动 · 第 %d 行" : "看完整改动", ask->line);
         ct_label_fill(more, B20, buf);
         ct_label(more, MB24, "›");
-        ct_tappable(more, NULL, NULL);
+        ct_tappable(more, on_full_diff, NULL);
     }
 
     if (ask->why != NULL) {
@@ -968,30 +1163,71 @@ static void show_approve(void) {
     ct_fmt_stat(buf, sizeof(buf), s->n.add, s->n.del);
     ct_label(sum, MB20, buf);
 
-    lv_obj_t *hint = ct_row(screen, 32, CT_PAD, 0);
-    if (ask->risky) {
-        ct_label(hint, F18, "有风险的操作，要长按“批准”才生效");
-    } else if (ask->until > 0) {
-        char clock[8];
-        ct_fmt_clock(clock, sizeof(clock), ask->until);
-        snprintf(buf, sizeof(buf), "%s 前没批准，就要回电脑确认", clock);
-        ct_label(hint, F18, buf);
-    }
-
-    lv_obj_t *bar = ct_bottom_bar(screen, 88);
-    lv_obj_set_style_pad_column(bar, 12, 0);
-    lv_obj_t *deny = ct_button(bar, "拒绝", B24, 100, 64, false, on_deny, NULL);
-    lv_obj_set_flex_grow(deny, 1);
-    if (ask->risky) {
-        lv_obj_t *ok = ct_button(bar, "长按批准", B24, 100, 64, true, NULL, NULL);
-        lv_obj_add_event_cb(ok, on_approve_long, LV_EVENT_LONG_PRESSED, NULL);
-        lv_obj_add_event_cb(ok, on_approve_short, LV_EVENT_SHORT_CLICKED, NULL);
-        lv_obj_set_flex_grow(ok, 1);
-    } else {
-        lv_obj_t *ok = ct_button(bar, "批准", B24, 100, 64, true, on_approve, NULL);
-        lv_obj_set_flex_grow(ok, 1);
-    }
+    approve_bar(screen, ask);
     present(screen, SCR_APPROVE);
+}
+
+/* ---------- the whole change of a permission request ---------- */
+
+/* One diff line that wraps instead of being cut off at the screen edge. */
+static void diff_line_wrapped(lv_obj_t *box, const char *line) {
+    const char kind = line[0];
+    lv_obj_t *row = ct_box(box);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_hor(row, 8, 0);
+    lv_obj_set_style_pad_ver(row, 2, 0);
+    lv_obj_set_style_pad_column(row, 8, 0);
+    if (kind == '+') {
+        ct_invert(row);
+    }
+    ct_label(row, M18, kind == '+' ? "+" : (kind == '-' ? "−" : " "));
+    lv_obj_t *code = ct_label(row, M18, kind != '\0' ? line + 1 : "");
+    lv_label_set_long_mode(code, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_width(code, 1);
+    lv_obj_set_flex_grow(code, 1);
+    ct_label_wrap(code);
+}
+
+static void on_back_approve(lv_event_t *e) {
+    (void)e;
+    show_approve();
+}
+
+static void show_diff(void) {
+    const ct_session_t *s = current();
+    if (s == NULL) {
+        session_gone();
+        return;
+    }
+    if (!wants_approval(s)) {
+        show_detail();
+        return;
+    }
+    const ct_ask_t *ask = &s->ask;
+    lv_obj_t *screen = ct_screen_new();
+    header(screen, s, on_back_approve);
+    char buf[96], stat[32];
+    ct_fmt_stat(stat, sizeof(stat), ask->add, ask->del);
+    if (ask->line > 0) {
+        snprintf(buf, sizeof(buf), "%s · 从第 %d 行起", ct_basename(ask->target), ask->line);
+    } else {
+        snprintf(buf, sizeof(buf), "%s", ct_basename(ask->target));
+    }
+    ct_meta(screen, buf, stat[0] != '\0' ? stat : NULL);
+
+    lv_obj_t *content = ct_content(screen, CT_PAD);
+    lv_obj_set_style_pad_top(content, 10, 0);
+    lv_obj_set_style_pad_row(content, 8, 0);
+    lv_obj_t *box = ct_diff_box(content);
+    for (int i = 0; i < ask->line_count; i++) {
+        diff_line_wrapped(box, ask->lines[i]);
+    }
+    if (ask->has_stat && ask->add + ask->del > ask->line_count) {
+        ct_paragraph(content, F18, "改动太长，这里只显示开头一段，完整内容要回电脑看。");
+    }
+    approve_bar(screen, ask);
+    present(screen, SCR_DIFF);
 }
 
 /* ---------- question ---------- */
@@ -1114,6 +1350,22 @@ static void report_para(lv_obj_t *parent, const ct_para_t *p) {
     lv_free(body_out);
 }
 
+static void on_done_prev(lv_event_t *e) {
+    (void)e;
+    if (s_page > 0) {
+        s_page--;
+        show_done();
+    }
+}
+
+static void on_done_next(lv_event_t *e) {
+    (void)e;
+    if (s_page + 1 < s_done_pages) {
+        s_page++;
+        show_done();
+    }
+}
+
 static void show_done(void) {
     const ct_session_t *s = current();
     if (s == NULL) {
@@ -1123,6 +1375,9 @@ static void show_done(void) {
     if (s->state != CT_STATE_DONE) {
         show_detail();
         return;
+    }
+    if (s_screen != SCR_DONE) {
+        s_page = 0;
     }
     lv_obj_t *screen = ct_screen_new();
     header(screen, s, on_back_list);
@@ -1144,12 +1399,43 @@ static void show_done(void) {
     }
 
     lv_obj_t *bar = ct_bottom_bar(screen, 76);
-    ct_pager(bar, "1/1", NULL, NULL);
+    ct_button(bar, "‹", MB24, 60, 56, false, on_done_prev, NULL);
+    lv_obj_t *pager = ct_label(bar, MB20, "1/1");
+    ct_button(bar, "›", MB24, 60, 56, false, on_done_next, NULL);
     ct_spacer(bar);
     ct_button(bar, "知道了", B20, 96, 56, !s->reply, on_dismiss, NULL);
     if (s->reply) {
         ct_button(bar, "回复", B20, 80, 56, true, on_open_reply, NULL);
     }
+
+    /* Long reports: split the paragraphs into pages that fit, show one page. */
+    lv_obj_update_layout(screen);
+    const int32_t room = lv_obj_get_content_height(content);
+    const uint32_t count = lv_obj_get_child_count(content);
+    int page = 0;
+    int32_t used = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        lv_obj_t *para = lv_obj_get_child(content, (int32_t)i);
+        const int32_t h = lv_obj_get_height(para);
+        if (used > 0 && used + h > room) {
+            page++;
+            used = 0;
+        }
+        used += h + 7;
+        lv_obj_set_user_data(para, (void *)(intptr_t)page);
+    }
+    s_done_pages = page + 1;
+    if (s_page >= s_done_pages) {
+        s_page = s_done_pages - 1;
+    }
+    for (uint32_t i = 0; i < count; i++) {
+        lv_obj_t *para = lv_obj_get_child(content, (int32_t)i);
+        if ((int)(intptr_t)lv_obj_get_user_data(para) != s_page) {
+            lv_obj_add_flag(para, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    snprintf(buf, sizeof(buf), "%d/%d", s_page + 1, s_done_pages);
+    lv_label_set_text(pager, buf);
     present(screen, SCR_DONE);
 }
 
@@ -1344,6 +1630,15 @@ static void follow_data(void) {
         }
         show_done();
         break;
+    case SCR_DIFF:
+        if (!wants_approval(s) || strcmp(req_of(s), s_req) != 0) {
+            s_next_refresh = CT_REFRESH_FAST;
+            open_session(s);
+        } else {
+            show_diff();
+        }
+        break;
+    case SCR_ENTRY: show_entry(); break;
     case SCR_REPLY: show_reply(); break;
     case SCR_VOICE: show_voice(); break;
     default: show_detail(); break;
@@ -1439,11 +1734,13 @@ void ct_ui_on_key(ct_key_t key, bool down) {
     case CT_KEY_PREV:
         if (s_screen == SCR_LIST) on_list_prev(NULL);
         else if (s_screen == SCR_DETAIL) on_detail_prev(NULL);
+        else if (s_screen == SCR_DONE) on_done_prev(NULL);
         break;
     case CT_KEY_VOL_DOWN:
     case CT_KEY_NEXT:
         if (s_screen == SCR_LIST) on_list_next(NULL);
         else if (s_screen == SCR_DETAIL) on_detail_next(NULL);
+        else if (s_screen == SCR_DONE) on_done_next(NULL);
         break;
     case CT_KEY_BOOT: {
         const ct_session_t *s = current();

@@ -211,6 +211,17 @@ def main():
     (out_dir / "ct_fonts.h").write_text("\n".join(header) + "\n", encoding="utf-8")
     print(f"total bitmap data: {total / 1024 / 1024:.2f} MB -> {out_dir}")
 
+    # What the device can show: every character the text fonts have (the code fonts
+    # fall back to them). The bridge swaps anything else before sending it.
+    shown = set()
+    for spec, glyphs, _ in rendered:
+        if spec.get("cjk"):
+            shown.update(g["ch"] for g in glyphs)
+    charset = root / cfg["charset"] if "charset" in cfg else None
+    if charset is not None:
+        charset.write_text("".join(sorted(shown)) + "\n", encoding="utf-8")
+        print(f"charset: {len(shown)} characters -> {charset}")
+
 
 if __name__ == "__main__":
     main()

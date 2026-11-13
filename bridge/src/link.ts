@@ -3,6 +3,7 @@
 
 import type { Clock } from './clock.ts';
 import type { Hub } from './hub.ts';
+import { fixStrings } from './glyphs.ts';
 import { LIMITS, PROTO, parseFromDevice, type SessionSnapshot, type ToDevice } from './protocol.ts';
 
 export interface LinkOptions {
@@ -16,6 +17,8 @@ export interface LinkOptions {
   tzMinutes: number;
   /** Changes to a session within this window go out as one snapshot. */
   flushMs: number;
+  /** Swap characters the device can't draw (see glyphs.ts). Default: send as is. */
+  fixText?: (text: string) => string;
 }
 
 export const DEFAULT_QUICK = ['继续下一步', '跑一下测试', '提交这些改动', '先停一下，等我回电脑', '撤销刚才的修改'];
@@ -86,13 +89,13 @@ export class DeviceLink {
     this.send({
       t: 'hello',
       proto: PROTO,
-      host: this.options.hostName,
+      host: this.fix(this.options.hostName),
       hostId: this.options.hostId,
       time: this.hub.nowSeconds(),
       tz: this.options.tzMinutes,
-      quick: this.options.quick,
+      quick: this.options.quick.map((q) => this.fix(q)),
     });
-    for (const snapshot of this.hub.list()) this.send({ t: 'session', s: forDevice(snapshot) });
+    for (const snapshot of this.hub.list()) this.send({ t: 'session', s: this.prepare(snapshot) });
     this.send({ t: 'ready' });
     this.detach ??= this.hub.attachDevice();
     this.unsubscribe ??= this.hub.subscribe((event) => {
@@ -107,9 +110,19 @@ export class DeviceLink {
     this.cancelFlush = null;
     for (const id of this.dirty) {
       const snapshot = this.hub.get(id);
-      this.send(snapshot ? { t: 'session', s: forDevice(snapshot) } : { t: 'gone', id });
+      this.send(snapshot ? { t: 'session', s: this.prepare(snapshot) } : { t: 'gone', id });
     }
     this.dirty.clear();
+  }
+
+  private fix(text: string): string {
+    return this.options.fixText ? this.options.fixText(text) : text;
+  }
+
+  /** A snapshot as the device gets it: trimmed to its limits, in characters it can draw. */
+  private prepare(snapshot: SessionSnapshot): SessionSnapshot {
+    const trimmed = forDevice(snapshot);
+    return this.options.fixText ? fixStrings(trimmed, this.options.fixText) : trimmed;
   }
 
   private send(msg: ToDevice): void {

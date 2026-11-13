@@ -1,7 +1,8 @@
 {
   "out_dir": "ui/fonts/gen",
   "scan": ["ui/src", "bridge/src"],
-  "extra": "",
+  "extra": "√",
+  "charset": "ui/fonts/charset.txt",
   "fonts": [
     { "name": "ct_font_text_18", "path": "third_party/fonts/sarasa-ui-sc/SarasaUiSC-Regular.ttf", "size": 18, "hinting": "native", "cjk": true },
     { "name": "ct_font_text_20", "path": "third_party/fonts/sarasa-ui-sc/SarasaUiSC-Regular.ttf", "size": 20, "hinting": "native", "cjk": true },
