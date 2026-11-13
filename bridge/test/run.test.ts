@@ -57,6 +57,8 @@ test('a managed run: the device types into the agent running in its terminal', {
     log: () => {},
   });
   const env = { ...process.env, CODETALKY_PORT: String(server.port), FAKE_PORT: String(server.port) };
+  let token = '';
+  runs.subscribe((e) => (token = e.run));
   const launcher = spawn(process.execPath, [MAIN, 'run', '--', process.execPath, FAKE], { env, stdio: ['pipe', 'pipe', 'pipe'] });
   let screen = '';
   launcher.stdout.on('data', (d: Buffer) => (screen += d.toString('utf8')));
@@ -70,11 +72,23 @@ test('a managed run: the device types into the agent running in its terminal', {
     await until('the agent to get the line', () => screen.includes('got: 跑一下测试'));
     await until('the prompt in the log', () => hub.get(session.id)!.log.some((e) => e.verb === '你' && e.target === '跑一下测试'));
 
+    // Keys for the agent's own prompt are pressed only while that prompt is on its screen.
+    assert.equal(await runs.press(token, 'y\r', 'Yes, proceed'), false);
+    hub.act({ t: 'reply', seq: 2, id: session.id, text: 'ask' });
+    await until('the prompt on the screen', () => screen.includes('Yes, proceed'));
+    // An instruction sent meanwhile is not typed into the prompt (its Enter would answer it): it waits.
+    hub.act({ t: 'reply', seq: 3, id: session.id, text: '等会儿再说' });
+    await new Promise((r) => setTimeout(r, 1200));
+    assert.equal(screen.includes('got: 等会儿再说'), false);
+    assert.equal(await runs.press(token, 'y\r', 'Yes, proceed'), true);
+    await until('the key to arrive', () => screen.includes('got: y'));
+    await until('the waiting instruction, once the prompt is gone', () => screen.includes('got: 等会儿再说'));
+
     // The user's own keyboard still works: the launcher passes it through.
     launcher.stdin.write('exit\r');
     assert.equal(await exited, 0);
     await until('replies to be turned off', () => hub.get(session.id)!.reply === false);
-    assert.equal(hub.act({ t: 'reply', seq: 2, id: session.id, text: '还在吗' }), 'unsupported');
+    assert.equal(hub.act({ t: 'reply', seq: 4, id: session.id, text: '还在吗' }), 'unsupported');
   } finally {
     launcher.kill();
     claude.stop();

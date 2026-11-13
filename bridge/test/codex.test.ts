@@ -1,18 +1,19 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { test } from 'node:test';
 
 import { HOOK_SCRIPT, codexHooks } from '../src/claude/hooks.ts';
-import { ClaudeSource } from '../src/claude/source.ts';
+import { CODEX_KEYS, ClaudeSource } from '../src/claude/source.ts';
 import { ManualClock } from '../src/clock.ts';
 import { parsePatch } from '../src/codex/patch.ts';
 import { codexTools } from '../src/codex/tools.ts';
 import { Hub } from '../src/hub.ts';
+import { Runs, type ToRun } from '../src/runs.ts';
 
 const T0 = 1_794_637_920;
 const SID = '019a0c5e-7b1d-7f00-9c11-2b4f6a8d0e33';
@@ -114,6 +115,133 @@ test('a Codex session: approval held for the device, patch recorded, report show
   s = hub.get(SID)!;
   assert.equal(s.state, 'done');
   assert.deepEqual(s.report, [{ text: '改好了：' }, { b: true, text: '每项按数量累加' }]);
+  codex.stop();
+});
+
+const item = (it: Record<string, unknown>) =>
+  JSON.stringify({ timestamp: '2026-11-13T13:25:00Z', type: 'event_msg', payload: { type: 'item_completed', thread_id: SID, turn_id: 't1', item: it } }) + '\n';
+
+test("Codex's edits come from its session file, and apply_patch through the shell shows as an edit", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ct-'));
+  const rollout = join(dir, 'rollout.jsonl');
+  // Already in the file when the bridge first looks: history, not counted.
+  writeFileSync(
+    rollout,
+    JSON.stringify({ type: 'session_meta', payload: {} }) + '\n' + item({ type: 'FileChange', id: 'old', status: 'completed', changes: { [join(dir, 'old.txt')]: { type: 'add', content: 'x\n' } } }),
+  );
+  const hub = new Hub(new ManualClock(T0 * 1000));
+  hub.attachDevice();
+  const codex = new ClaudeSource(hub, new ManualClock(T0 * 1000), { holdSeconds: 300, log: () => {}, agent: 'codex', tools: codexTools });
+  const send = (event: string, extra: Record<string, unknown> = {}) =>
+    codex.handle({ session_id: SID, cwd: dir, transcript_path: rollout, hook_event_name: event, ...extra });
+  await send('SessionStart', { source: 'startup' });
+  await send('UserPromptSubmit', { prompt: '加一行' });
+
+  const patch = "apply_patch <<'PATCH'\n*** Begin Patch\n*** Update File: note.txt\n@@\n+one\n*** End Patch\nPATCH";
+  await send('PreToolUse', { tool_name: 'Bash', tool_input: { command: patch }, tool_use_id: 'exec-1' });
+  let s = hub.get(SID)!;
+  assert.deepEqual(s.now, { verb: 'Edit', target: 'note.txt' });
+
+  appendFileSync(rollout, item({ type: 'AgentMessage', id: 'm1', content: [{ type: 'Text', text: '我来加一行。' }], phase: 'commentary' }));
+  await send('PreToolUse', { tool_name: 'Bash', tool_input: { command: 'type note.txt' } });
+  assert.equal(hub.get(SID)!.say, '我来加一行。');
+
+  appendFileSync(
+    rollout,
+    item({ type: 'FileChange', id: 'exec-1', status: 'completed', changes: { [join(dir, 'note.txt')]: { type: 'update', unified_diff: '@@ -3 +3,2 @@\n two\n+one\n', move_path: null } } }) +
+      item({ type: 'FileChange', id: 'exec-2', status: 'declined', changes: { [join(dir, 'b.txt')]: { type: 'add', content: 'no\n' } } }),
+  );
+  await send('Stop', { last_assistant_message: '好了' });
+  s = hub.get(SID)!;
+  assert.deepEqual(s.n, { read: 0, edit: 1, new: 0, cmd: 0, add: 1, del: 0 });
+  assert.deepEqual(s.files, [{ st: 'M', path: 'note.txt', add: 1, del: 0 }]);
+  assert.deepEqual(s.hunks.list, [{ file: 'note.txt', line: 3, add: 1, del: 0, lines: [' two', '+one'] }]);
+  assert.deepEqual(s.log[0], { at: T0, verb: 'Edit', target: 'note.txt', add: 1, del: 0, res: undefined, bad: undefined });
+
+  // If Codex ever does report the patch through PostToolUse, it isn't counted twice.
+  await send('PostToolUse', { tool_name: 'apply_patch', tool_input: { command: patch.split('\n').slice(1, -1).join('\n') } });
+  assert.equal(hub.get(SID)!.n.edit, 1);
+  codex.stop();
+});
+
+test('a managed Codex run: on the device before its first prompt, and its terminal prompt answered with keys', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ct-'));
+  const clock = new ManualClock(T0 * 1000);
+  const hub = new Hub(clock);
+  hub.attachDevice();
+  const runs = new Runs();
+  const codex = new ClaudeSource(hub, clock, { holdSeconds: 300, log: () => {}, runs, agent: 'codex', tools: codexTools, terminalKeys: CODEX_KEYS });
+  const TOKEN = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  const sent: ToRun[] = [];
+  let promptUp = true;
+  const remove = runs.add(TOKEN, 'codex', dir, (m) => {
+    sent.push(m);
+    if (m.t === 'press') queueMicrotask(() => runs.pressed(TOKEN, m.id, promptUp));
+  });
+  const ID = 'run-aaaaaaaa';
+  let s = hub.get(ID)!;
+  assert.deepEqual([s.agent, s.state, s.reply, s.name], ['codex', 'idle', true, basename(dir)]);
+
+  // The device sends the first instruction; Codex starts its session with it, under the same entry.
+  assert.equal(hub.act({ t: 'reply', seq: 1, id: ID, text: '加一行' }), null);
+  assert.deepEqual(sent, [{ t: 'type', text: '加一行' }]);
+  const send = (event: string, extra: Record<string, unknown> = {}) =>
+    codex.handle({ session_id: SID, cwd: dir, model: 'gpt-6-luna', hook_event_name: event, ...extra }, { 'x-codetalky-run': TOKEN });
+  await send('SessionStart', { source: 'startup' });
+  await send('UserPromptSubmit', { prompt: '加一行' });
+  assert.equal(hub.get(SID), undefined);
+  s = hub.get(ID)!;
+  assert.deepEqual([s.state, s.reply, s.model, s.log[0]!.verb], ['running', true, 'gpt-6-luna', '你']);
+
+  // A permission request is not held (Codex wouldn't draw its prompt meanwhile): the device's answer is a key press.
+  const ask = (command: string) => send('PermissionRequest', { tool_name: 'Bash', tool_input: { command, description: '追加' } });
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(await ask('echo two >> note.txt'), { status: 200 });
+  s = hub.get(ID)!;
+  assert.ok(s.state === 'approve' && s.ask?.kind === 'approve');
+  hub.act({ t: 'approve', seq: 2, id: ID, req: s.ask.req, allow: true });
+  await tick();
+  assert.deepEqual(sent.at(-1), { t: 'press', id: 1, keys: 'y', expect: CODEX_KEYS.expect });
+  assert.deepEqual([hub.get(ID)!.state, hub.get(ID)!.ask], ['running', undefined]);
+
+  await ask('rm -rf build');
+  hub.act({ t: 'approve', seq: 3, id: ID, req: (hub.get(ID)!.ask as { req: string }).req, allow: false });
+  await tick();
+  assert.equal((sent.at(-1) as { keys: string }).keys, '\x1b');
+  assert.equal(hub.get(ID)!.log[0]!.res, '已拒绝');
+  // Saying no stops Codex's turn without a Stop event: the device shows it waiting for an instruction.
+  await tick();
+  assert.deepEqual([hub.get(ID)!.state, hub.get(ID)!.say], ['idle', '已拒绝，它停下来了，等你的下一条指令']);
+
+  // Answered at the computer: Codex goes on to its next tool call, and the device lets go.
+  await ask('echo three >> note.txt');
+  await send('PreToolUse', { tool_name: 'Bash', tool_input: { command: 'type note.txt' } });
+  assert.deepEqual([hub.get(ID)!.ask, hub.get(ID)!.say], [undefined, '已在电脑上处理']);
+
+  // The prompt is gone by the time the device answers: nothing is pressed, and the device is told.
+  await ask('echo four >> note.txt');
+  promptUp = false;
+  hub.act({ t: 'approve', seq: 4, id: ID, req: (hub.get(ID)!.ask as { req: string }).req, allow: true });
+  await tick();
+  await tick();
+  assert.equal(hub.get(ID)!.say, '终端里已经没有这个确认框了，没有按');
+
+  // Codex exits: its session ends, then the terminal closes. The report stays until seen.
+  await send('Stop', { last_assistant_message: '好了' });
+  await send('SessionEnd');
+  assert.equal(hub.get(ID)!.state, 'done');
+  remove();
+  assert.deepEqual([hub.get(ID)!.state, hub.get(ID)!.reply], ['done', false]);
+
+  // A terminal closed before Codex did anything leaves nothing behind.
+  const other = 'bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  const close = runs.add(other, 'codex', dir, () => {});
+  assert.ok(hub.get('run-bbbbbbbb'));
+  close();
+  assert.equal(hub.get('run-bbbbbbbb'), undefined);
+  // Runs of the other agent are not Codex's to show.
+  runs.add('cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee', 'claude', dir, () => {});
+  assert.equal(hub.get('run-cccccccc'), undefined);
   codex.stop();
 });
 

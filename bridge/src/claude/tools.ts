@@ -138,6 +138,8 @@ export interface ToolKit {
   counterOf(tool: string, created: boolean): Counter | null;
   resultOf(tool: string, input: Input, response: unknown, cwd: string | undefined): ToolResult;
   askOf(tool: string, input: Input, cwd: string | undefined): AskBody;
+  /** A call that is really another tool (Codex runs apply_patch through the shell). */
+  normalize?(tool: string, input: Input): { tool: string; input: Input };
 }
 
 const lineCount = (text: string) => (text === '' ? 0 : text.replace(/\n$/, '').split('\n').length);

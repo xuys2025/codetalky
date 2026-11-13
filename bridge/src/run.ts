@@ -10,13 +10,21 @@ import { existsSync, readFileSync } from 'node:fs';
 import { delimiter, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 
 import { spawn } from '@lydell/node-pty';
+import xterm from '@xterm/headless';
 import WebSocket from 'ws';
 
-import { RUN_ENV, type ToRun } from './runs.ts';
+import { RUN_ENV, type FromRun, type ToRun } from './runs.ts';
 
 const RECONNECT_MS = 3000;
 /** Claude Code treats a fast burst of keys as a paste; Enter right after it would be part of it. */
 const ENTER_DELAY_MS = 150;
+/**
+ * The agent's permission prompt is on the screen (Claude Code's and Codex's). Typed
+ * into that, an instruction's Enter (or a "y" in it) would answer the prompt, so an
+ * instruction waits until the prompt is gone.
+ */
+export const PROMPT_UP = /No, and tell \w+ what to do differently|Yes, proceed|Press enter to confirm/i;
+const PROMPT_POLL_MS = 400;
 
 /** Find a command on PATH. npm's .cmd shims on Windows are followed to the program they start. */
 export function resolveCommand(name: string, env: NodeJS.ProcessEnv = process.env): { file: string; prefix: string[] } {
@@ -75,6 +83,9 @@ export function runManaged(o: RunOptions): Promise<number> {
     env: { ...process.env, [RUN_ENV]: token } as Record<string, string>,
   });
 
+  // A copy of the screen, so keys for a prompt are only pressed while the prompt is up.
+  const screen = new xterm.Terminal({ cols, rows, allowProposedApi: true, scrollback: 0 });
+
   // The user's keyboard and screen, passed straight through.
   const stdin = process.stdin;
   const raw = stdin.isTTY === true;
@@ -82,9 +93,50 @@ export function runManaged(o: RunOptions): Promise<number> {
   stdin.resume();
   const onInput = (data: Buffer) => term.write(data.toString('utf8'));
   stdin.on('data', onInput);
-  term.onData(out);
-  const onResize = () => term.resize(process.stdout.columns || cols, process.stdout.rows || rows);
+  term.onData((data) => {
+    out(data);
+    screen.write(data);
+  });
+  const onResize = () => {
+    const c = process.stdout.columns || cols;
+    const r = process.stdout.rows || rows;
+    term.resize(c, r);
+    screen.resize(c, r);
+  };
   process.stdout.on('resize', onResize);
+
+  /** The visible screen as text, once everything written so far has been drawn. */
+  const screenText = () =>
+    new Promise<string>((ready) =>
+      screen.write('', () => {
+        const b = screen.buffer.active;
+        const lines: string[] = [];
+        for (let i = 0; i < screen.rows; i++) lines.push(b.getLine(b.viewportY + i)?.translateToString(true) ?? '');
+        ready(lines.join('\n'));
+      }),
+    );
+  const press = async (keys: string, expect: string): Promise<boolean> => {
+    let pattern: RegExp;
+    try {
+      pattern = new RegExp(expect, 'i');
+    } catch {
+      return false;
+    }
+    if (!pattern.test(await screenText())) return false;
+    term.write(keys);
+    return true;
+  };
+  // Instructions are typed one after another, each once no prompt is up.
+  let typing: Promise<void> = Promise.resolve();
+  const typeLine = (keys: string) => {
+    typing = typing.then(async () => {
+      while (!done && PROMPT_UP.test(await screenText())) await new Promise((r) => setTimeout(r, PROMPT_POLL_MS));
+      if (done) return;
+      term.write(keys);
+      await new Promise((r) => setTimeout(r, ENTER_DELAY_MS));
+      if (!done) term.write('\r');
+    });
+  };
 
   // The bridge: say which run this is, then type whatever it sends.
   let socket: WebSocket | null = null;
@@ -101,11 +153,15 @@ export function runManaged(o: RunOptions): Promise<number> {
       } catch {
         return;
       }
+      if (msg.t === 'press' && typeof msg.keys === 'string' && typeof msg.expect === 'string') {
+        void press(msg.keys, msg.expect).then((ok) => {
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: 'pressed', id: msg.id, ok } satisfies FromRun));
+        });
+        return;
+      }
       if (msg.t !== 'type' || typeof msg.text !== 'string') return;
       const keys = asKeys(msg.text);
-      if (!keys) return;
-      term.write(keys);
-      setTimeout(() => term.write('\r'), ENTER_DELAY_MS);
+      if (keys) typeLine(keys);
     });
     ws.on('error', () => {});
     ws.on('close', () => {
@@ -123,6 +179,7 @@ export function runManaged(o: RunOptions): Promise<number> {
       if (raw) stdin.setRawMode(false);
       stdin.pause();
       process.stdout.off('resize', onResize);
+      screen.dispose();
       resolveExit(exitCode);
     });
   });

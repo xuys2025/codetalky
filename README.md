@@ -61,7 +61,7 @@ node src/main.ts            # 起服务；加 --fake 可以同时看演示会话
 
 之后在任何终端里开的 Claude Code 会话都会出现在设备上，批准请求和它的提问可以在设备上回答。终端里的确认框也照常弹出，在哪边答都行，另一边自动收起；设备没连上或期限内没回话时，就只在终端里答。不用了就 `node src/main.ts hooks --remove ~/.claude/settings.json`。细节见 `docs/STATUS.md` 的“第 7 项”。
 
-想从设备给 Claude 发新指令，用 `codetalky claude` 代替 `claude` 启动（参数照旧）。在 `bridge` 目录运行一次 `npm link`，之后任何终端里都有 `codetalky` 命令；不想装就用 `node <仓库>/bridge/src/main.ts claude`。它在终端里看起来和直接运行 `claude` 一样，设备发来的指令会像键盘输入一样打进去。
+想从设备给 Claude 发新指令，用 `codetalky claude` 代替 `claude` 启动（参数照旧）。在 `bridge` 目录运行一次 `npm link`，之后任何终端里都有 `codetalky` 命令；不想装就用 `node <仓库>/bridge/src/main.ts claude`。它在终端里看起来和直接运行 `claude` 一样，一启动设备上就有这个会话，设备发来的指令会像键盘输入一样打进去。终端里正弹着确认框时，指令先等着，确认框答完再打进去（不然它的回车会替你答了确认框）。
 
 Codex 也一样，只是它的钩子只能是命令，并且新钩子要先在 Codex 里信任一次：
 
@@ -70,6 +70,11 @@ node src/main.ts hooks --codex --merge ~/.codex/hooks.json
 codex          # 进去后输入 /hooks，信任 CodeTalky 的钩子
 codetalky codex  # 想从设备发指令时用它代替 codex 启动
 ```
+
+和 Claude 有两点不同：
+
+- Codex 在钩子等待期间不显示自己的确认框。用 `codetalky codex` 启动时，确认框照常立刻出现在终端里，设备上的批准、拒绝就是替你在终端里按 `y`、Esc，两边都能答。直接运行 `codex` 时，设备在等待期限内先答，这期间终端里只显示 “Running hook”，在电脑上答不了。
+- 什么时候要批准由 Codex 的模型自己决定（审批策略只有 `on-request` 和 `never`）。在默认的工作区可写沙盒里，它只在要越出沙盒时才问，所以批准请求比 Claude 少。
 
 `~/.codex/` 是 Codex 命令行和桌面版共用的，桌面版的设置里也有钩子信任，所以桌面版里的会话应该也会出现在设备上（还没实测）。
 

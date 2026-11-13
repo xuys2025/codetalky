@@ -57,7 +57,7 @@
 会话数据（`tools/transcript-shape.mjs` 可以重查）：
 
 - Claude Code 的会话记录里有模型名、每一步的工具和文件路径、每次修改的逐行补丁、说明文字、git 分支和 token 用量。
-- Codex 的记录格式还没核对。
+- Codex 的会话记录（`~/.codex/sessions/…/rollout-*.jsonl`，0.169）大部分是原始的模型往来，但其中的 `item_completed` 事件是整理好的条目：UserMessage、AgentMessage（分说明和最终回答）、FileChange（每个文件的 unified diff 和是否成功）、CommandExecution（命令、退出码）。电脑端服务只读这一种。
 
 ## 代码现状（11-14 更新）
 
@@ -201,7 +201,7 @@ node src/main.ts hooks --remove ~/.claude/settings.json  # 不用了就撤掉
 7. （已做）接 Claude Code 的钩子，跑通真实的批准闭环（第 2 阶段）。
 8. （已做）在 WSL 里装 ESP-IDF v5.5.4，官方固件原样编译通过（`Metalio-E-Ink4.bin`，4.16 MB）。脚本 `tools/esp/install-idf.sh` 可重跑：Python 3.12 用 uv 装（系统的 3.14 太新）；ESP-IDF 和工具链都从乐鑫镜像 dl.espressif.com 下载，不用代理；openocd 缺的 libusb 不用 sudo，下载 Ubuntu 的包解压到 `~/esp/libusb`；官方资源打包要的 qoi-conv 预先装好。官方仓库在 WSL 里重新克隆到 `~/work/metalio`，符号链接才是真的。
 9. （已做，11-13 真 Claude Code 实测通过，见上面第 7 项的实测记录）托管终端：`codetalky claude` 在伪终端里启动 Claude Code（node-pty 的预编译版 `@lydell/node-pty`，Windows 上走 ConPTY），你照常用。启动时生成一个运行标记放进环境变量 `CODETALKY_RUN`，钩子把它放在请求头里带回来，电脑端服务就知道这个会话是托管的，设备上的“发指令”“回复”随之打开。设备发来的指令合成一行，先输入文字，停 150 毫秒再按回车（免得被当成粘贴）。启动器退出后“发指令”自动关掉；电脑端服务重启后启动器 3 秒内自动重连。用假的命令行程序测过整条链路，真 Claude Code 还没测。
-10. （已做，待真实测试）接 Codex。本机的 Codex CLI 11-13 从 0.136 升到了 0.169（当时的最新版），用 ChatGPT 账号登录，`codex doctor` 检查全部正常；钩子功能是稳定版，默认开着。和 Claude Code 的区别：
+10. （已做，11-13 真 Codex 实测通过，见下面）接 Codex。本机的 Codex CLI 11-13 从 0.136 升到了 0.169（当时的最新版），用 ChatGPT 账号登录，`codex doctor` 检查全部正常；钩子功能是稳定版，默认开着。和 Claude Code 的区别：
     - 钩子只能是命令，没有 HTTP 型，所以用一个转发脚本 `bridge/hooks/hook.mjs` 把事件交给电脑端服务（`/hooks/codex`），再把答复打印回去；电脑端没开时打印 `{}`，Codex 照常问你。脚本用 `node:http` 而不是 `fetch`，因为 `fetch` 等响应头最多 300 秒，批准要等更久。
     - 新钩子要先信任：合并配置后启动 codex，输入 `/hooks` 信任一次。有个每次跳过信任的启动参数（`--dangerously-bypass-hook-trust`），会连别的钩子一起放行，不用。
     - `~/.codex/` 是 Codex 命令行和桌面版共用的，文档说桌面版的设置里也能信任钩子。所以钩子加进 `~/.codex/hooks.json`（并信任）以后，桌面版里的会话应该也会出现在设备上、能在设备上批准，但不能从设备发指令（那要托管终端）。还没实测。
@@ -210,7 +210,14 @@ node src/main.ts hooks --remove ~/.claude/settings.json  # 不用了就撤掉
     - 模型名直接在事件里；分支直接读项目的 `.git/HEAD`（Claude 也用上了）。
     - 文档没说钩子能不能回答 Codex 的提问，所以 Codex 先只做批准，不做提问。
     - 批准请求的等待、排队、超时交回终端、托管终端（`codetalky codex`）和 Claude 共用同一套代码。
-    - 用模拟事件和真的转发脚本测过，真 Codex 还没测。
+    - 11-13 真 Codex 实测（gpt-6-luna、低推理强度、只读沙盒，脚本扮演设备和坐在终端前的人）发现的情况和改法：
+      - Codex 要到第一条指令提交时才开始会话（SessionStart 那时才来），设备看不到刚启动的 `codetalky codex`，没法发第一条指令。改成：启动器一连上电脑端服务，设备上就有这个会话（编号 `run-` 开头）；Codex 的会话来了接管同一条，设备页面不跳。Claude 也一样，`/clear` 换了会话也还是同一条。
+      - 钩子在等设备时，Codex 不画自己的确认框（终端只显示 “Running hook”），直到钩子返回。所以托管的 Codex 不再让钩子等：钩子立刻返回，确认框马上出现在终端里；设备上批准或拒绝，就是启动器在终端里按 `y` 或 Esc。按之前先看屏幕上确实有确认框（启动器用 `@xterm/headless` 留一份屏幕），没有就不按，设备上提示一句。直接运行的 `codex`（和桌面版）还是让钩子等设备，那期间电脑上答不了。
+      - 在 Codex 里按 Esc 拒绝会结束这一轮，而且不发 Stop。设备拒绝后显示“已拒绝，它停下来了，等你的下一条指令”。
+      - `apply_patch` 不发 PostToolUse，改动记不下来；它的 PreToolUse 说的是 Bash，命令是 `apply_patch <<'PATCH' …`。改成：Bash 里的 apply_patch 当补丁显示；改了什么从 Codex 的会话记录文件（钩子里的 `transcript_path`）读，那里有 `item_completed` 的 FileChange（每个文件的 unified diff）和 AgentMessage（它边做边说的话，设备上的 say 也有了）。头一次读到的是历史，不算。
+      - 什么时候要批准由模型决定（0.169 的审批策略只剩 `on-request` 和 `never`）。只读沙盒里便宜模型会直接报“没权限”而不申请，测试时在指令里让它直接申请提权。
+    - 顺带修的一个两边都有的问题：终端里弹着确认框时，设备发来的指令如果直接打进去，它的回车（Codex 里还有字母 y）会替你答了确认框。现在启动器打字前先看屏幕，确认框还在就等它没了再打。
+    - 实测结果：启动 0.4 秒设备上就有会话，设备发第一条指令；设备批准后 0.17 秒 Codex 继续；终端里答了，0.9 秒后设备离开批准页；设备期限到了终端的确认框还在；确认框弹着时设备发的指令等到确认框答完才打进去，Codex 也照做了；设备拒绝后 Codex 停下、设备显示停下了；退出后会话消失。
 
 ## 配对（已完成）
 
@@ -230,10 +237,7 @@ node src/main.ts hooks --remove ~/.claude/settings.json  # 不用了就撤掉
 
 1. （11-13 通过）托管终端 + 真 Claude Code。
 2. （11-13 通过）交互式会话里的批准：设备批准、终端里答、谁都不答三种都测了。
-3. Codex：还要你动手两步才能测。加钩子是改你的全局配置（桌面版也读），我这边的权限检查不让我自己改；跳过信任的启动参数也被拦了。要你做的：
-   - 合并钩子：`cd D:\CodeTalky\bridge` 后运行 `node src/main.ts hooks --codex --merge $HOME\.codex\hooks.json`（文件原来不存在，撤掉用 `--remove`）。
-   - 在测试目录里开一次 codex：信任这个目录，再输入 `/hooks` 把 CodeTalky 的 7 个钩子都信任，然后 `/quit`。
-   之后我用 `codetalky codex -m gpt-6-luna -c model_reasoning_effort="low" -s read-only -a on-request` 跑和 Claude 一样的脚本（只读沙盒让每次写文件都要批准）。测试脚本在临时目录 `scratchpad/e2e/live.mjs`。
+3. （11-13 通过）Codex：你合并了钩子并在 Codex 里信任了它们，我用 `codetalky codex -m gpt-6-luna -c model_reasoning_effort=low -s read-only -a on-request` 跑了四轮，前三轮各发现问题、改完再跑，第四轮全部通过（见上面第 10 项）。钩子还留在 `~/.codex/hooks.json` 里，撤掉用 `node src/main.ts hooks --codex --remove ~/.codex/hooks.json`。桌面版还没测。
 4. 多台电脑的真实场景：要第二台电脑，需要你来配合。
 
 ## 常用命令

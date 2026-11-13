@@ -201,10 +201,17 @@ export function startServer(hub: Hub, clock: Clock, options: ServerOptions): Pro
       }
       sockets.handleUpgrade(req, socket, head, (ws) => {
         let remove: (() => void) | null = null;
+        let token = '';
         ws.on('message', (data, isBinary) => {
           const msg = isBinary ? null : parseFromRun(data.toString());
-          if (!msg || remove) return;
-          remove = runs.add(msg.run, msg.agent, msg.cwd, (text) => ws.send(JSON.stringify({ t: 'type', text } satisfies ToRun)));
+          if (!msg) return;
+          if (msg.t === 'pressed') {
+            if (remove) runs.pressed(token, msg.id, msg.ok);
+            return;
+          }
+          if (remove) return;
+          token = msg.run;
+          remove = runs.add(msg.run, msg.agent, msg.cwd, (out: ToRun) => ws.send(JSON.stringify(out)));
           options.log(`managed ${msg.agent || 'agent'} started in ${msg.cwd}`);
         });
         ws.on('close', () => remove?.());

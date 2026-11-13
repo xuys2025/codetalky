@@ -1,22 +1,41 @@
-// Claude Code sessions, as seen through its hooks (HTTP hooks POSTing to the bridge).
+// Claude Code and Codex sessions, as seen through their hooks.
 //
 // Permission requests and questions are held open while a device is connected, so the
 // user can answer on the device. If no device is connected, or nobody answers before
-// the deadline, or the device goes away, the hook returns without a decision and
-// Claude Code asks in the terminal as usual. While a request is held, the terminal
-// does not show its prompt: Claude Code runs the hook first.
+// the deadline, or the device goes away, the hook returns without a decision and the
+// agent asks in the terminal as usual. Claude Code shows its own prompt in the
+// terminal while the hook waits, and whichever side answers first wins.
+//
+// Codex does not draw its prompt while a hook runs. For Codex sessions started with
+// `codetalky codex` the request is therefore not held: the prompt comes up in the
+// terminal at once, and the device answers it by pressing its keys there. Plain
+// `codex` sessions are held like Claude's, and their terminal waits meanwhile.
+//
+// Managed runs (codetalky claude/codex) show on the device as soon as their terminal
+// opens, before the agent has a session (Codex starts one only at the first prompt),
+// and keep that one entry across the agent's sessions (/clear).
 
 import { LIMITS, type ApproveAsk, type QuestionAsk, type SessionSnapshot } from '../protocol.ts';
 import type { Clock } from '../clock.ts';
 import type { Hub } from '../hub.ts';
 import type { IncomingHttpHeaders } from 'node:http';
 
-import { RUN_HEADER, type Runs } from '../runs.ts';
+import { RUN_HEADER, type RunEvent, type Runs } from '../runs.ts';
 import type { PostReply } from '../server.ts';
 import { firstWords, reportFromMarkdown, shortModel } from './text.ts';
 import { gitBranch } from '../git.ts';
-import { claudeTools, type ToolKit } from './tools.ts';
+import { claudeTools, type ToolKit, type ToolResult } from './tools.ts';
 import { TranscriptTail, todosFrom } from './transcript.ts';
+import { RolloutTail, type CompletedChange } from '../codex/rollout.ts';
+import { changeResult } from '../codex/tools.ts';
+
+/** Keys that answer the agent's own permission prompt in its terminal. */
+export interface TerminalKeys {
+  allow: string;
+  deny: string;
+  /** Only pressed while the screen matches this (case-insensitive regular expression). */
+  expect: string;
+}
 
 export interface ClaudeOptions {
   /** How long a permission request or question waits for the device, in seconds. */
@@ -27,8 +46,17 @@ export interface ClaudeOptions {
   agent?: 'claude' | 'codex';
   /** How that agent's tools look on the device (default Claude Code's). */
   tools?: ToolKit;
+  /**
+   * For managed runs: don't hold permission requests; let the agent show its prompt in
+   * the terminal at once, and answer it from the device with these keys. For agents
+   * that don't draw their prompt while a hook is running (Codex).
+   */
+  terminalKeys?: TerminalKeys;
   log: (line: string) => void;
 }
+
+/** Codex's approval prompt in its terminal, and the keys that answer it. */
+export const CODEX_KEYS: TerminalKeys = { allow: 'y', deny: '\x1b', expect: 'Yes, proceed|Press enter to confirm' };
 
 /** Sessions with no hook events for this long are dropped (the terminal was closed). */
 const FORGET_AFTER_S = 12 * 3600;
@@ -67,13 +95,18 @@ interface Held {
   index?: number;
   answers?: Record<string, string>;
   input: Record<string, unknown>;
+  /** Not held: the agent's own prompt is up in the terminal, and the device answers it with keys. */
+  viaKeys?: boolean;
   finish: (reply: PostReply) => void;
   cancelTimer: () => void;
 }
 
 interface Session {
+  /** The id on the device. */
   id: string;
   tail: TranscriptTail | null;
+  /** Codex: its session file, for file changes and what it says. */
+  rollout: RolloutTail | null;
   lastText: string | undefined;
   lastEvent: number;
   held: Held[];
@@ -81,7 +114,15 @@ interface Session {
   ended: boolean;
   /** The run token its hooks carry, if it was started with codetalky claude. */
   token: string | null;
+  /**
+   * A managed run whose agent hasn't started a session yet (Codex starts one only at
+   * the first prompt) or is between sessions (/clear). Shown so the device can send it
+   * an instruction; the next session from the same run takes over this entry.
+   */
+  waiting: boolean;
 }
+
+const emptyCounts = () => ({ read: 0, edit: 0, new: 0, cmd: 0, add: 0, del: 0 });
 
 export class ClaudeSource {
   private readonly hub: Hub;
@@ -90,6 +131,8 @@ export class ClaudeSource {
   private readonly agent: 'claude' | 'codex';
   private readonly tools: ToolKit;
   private readonly sessions = new Map<string, Session>();
+  /** The agent's session id -> the device's, where they differ (a managed run's entry was there first). */
+  private readonly aliases = new Map<string, string>();
   private nextReq = 1;
   private cancelSweep: () => void;
   private readonly unsubscribe: () => void;
@@ -112,13 +155,85 @@ export class ClaudeSource {
         this.forget(event.id);
       }
     });
-    // A managed terminal opened or closed: its sessions can or can't take instructions.
-    this.unsubscribeRuns =
-      options.runs?.subscribe((event) => {
-        for (const session of this.sessions.values()) {
-          if (session.token === event.run) this.setToken(session, event.run);
+    this.unsubscribeRuns = options.runs?.subscribe((event) => this.onRun(event)) ?? (() => {});
+  }
+
+  /** A managed terminal opened or closed. */
+  private onRun(event: RunEvent): void {
+    if (event.type === 'started' && event.agent === this.agent) {
+      this.waitFor(event.run, event.cwd);
+      return;
+    }
+    for (const session of [...this.sessions.values()]) {
+      if (session.token !== event.run) continue;
+      if (event.type === 'ended') {
+        for (const held of session.held.filter((h) => h.viaKeys)) this.release(session, held, '');
+      }
+      if (event.type === 'ended' && session.waiting) {
+        // Closed before (or after) its agent did anything worth keeping.
+        if (this.hub.get(session.id)?.state === 'done') {
+          session.ended = true;
+          this.setToken(session, event.run);
+        } else {
+          this.forget(session.id);
         }
-      }) ?? (() => {});
+        continue;
+      }
+      this.setToken(session, event.run);
+    }
+  }
+
+  /** Show a managed run before its agent has a session, so the device can send the first instruction. */
+  private waitFor(run: string, cwd: string): void {
+    const id = `run-${run.slice(0, 8)}`;
+    if (this.sessions.has(id)) return;
+    const session: Session = {
+      id,
+      tail: null,
+      rollout: null,
+      lastText: undefined,
+      lastEvent: this.now(),
+      held: [],
+      ended: false,
+      token: run,
+      waiting: true,
+    };
+    this.sessions.set(id, session);
+    this.put(id, cwd || undefined, true);
+    this.options.log(`${this.agent} run ${run.slice(0, 8)} waiting in ${cwd}`);
+  }
+
+  private put(id: string, cwd: string | undefined, reply: boolean): void {
+    const now = this.now();
+    this.hub.put(
+      {
+        id,
+        name: cwd ? baseName(cwd) : id.slice(0, 8),
+        agent: this.agent,
+        branch: cwd ? gitBranch(cwd) : undefined,
+        model: '—', // until the transcript or SessionStart says which
+        state: 'idle',
+        since: now,
+        started: now,
+        reply,
+        n: emptyCounts(),
+        log: [],
+        files: [],
+        hunks: { total: 0, list: [] },
+      },
+      {
+        decide: (req, allow) => this.decide(id, req, allow),
+        answer: (req, option) => this.answer(id, req, option),
+        reply: (text) => this.reply(id, text),
+      },
+    );
+  }
+
+  /** Start reading the agent's transcript (Claude Code) or session file (Codex). */
+  private attach(session: Session, transcript: string | undefined): void {
+    if (!transcript) return;
+    if (this.agent === 'claude' && !session.tail) session.tail = new TranscriptTail(transcript);
+    if (this.agent === 'codex' && session.rollout?.path !== transcript) session.rollout = new RolloutTail(transcript);
   }
 
   stop(): void {
@@ -172,59 +287,57 @@ export class ClaudeSource {
   }
 
   private session(event: Event, run: string | null): Session {
-    const id = event.session_id.slice(0, LIMITS.id);
-    let session = this.sessions.get(id);
+    const own = event.session_id.slice(0, LIMITS.id);
     const cwd = str(event.cwd);
+    const transcript = str(event.transcript_path);
+    let id = this.aliases.get(own) ?? own;
+    let session = this.sessions.get(id);
+    if ((!session || !this.hub.get(id)) && run) {
+      // The first session of a managed run that is already on the device: take over its entry.
+      const waiting = [...this.sessions.values()].find((s) => s.waiting && s.token === run && this.hub.get(s.id));
+      if (waiting) {
+        this.aliases.set(own, waiting.id);
+        id = waiting.id;
+        session = waiting;
+        session.waiting = false;
+        session.ended = false;
+        this.options.log(`${this.agent} session ${own.slice(0, 8)} in ${cwd ?? '?'}`);
+      }
+    }
+    if (session?.waiting) session.waiting = false;
     if (!session || !this.hub.get(id)) {
-      const transcript = str(event.transcript_path);
       session = {
         id,
-        // Codex's rollout files are another format, and its events name the model anyway.
-        tail: transcript && this.agent === 'claude' ? new TranscriptTail(transcript) : null,
+        tail: null,
+        rollout: null,
         lastText: undefined,
         lastEvent: this.now(),
         held: [],
         ended: false,
         token: null,
+        waiting: false,
       };
       this.sessions.set(id, session);
-      const now = this.now();
-      this.hub.put(
-        {
-          id,
-          name: cwd ? baseName(cwd) : id.slice(0, 8),
-          agent: this.agent,
-          branch: cwd ? gitBranch(cwd) : undefined,
-          model: '—', // until the transcript or SessionStart says which
-          state: 'idle',
-          since: now,
-          started: now,
-          reply: false, // until a managed run claims it
-          n: { read: 0, edit: 0, new: 0, cmd: 0, add: 0, del: 0 },
-          log: [],
-          files: [],
-          hunks: { total: 0, list: [] },
-        },
-        {
-          decide: (req, allow) => this.decide(id, req, allow),
-          answer: (req, option) => this.answer(id, req, option),
-          reply: (text) => this.reply(id, text),
-        },
-      );
+      this.put(id, cwd, false); // replies stay off until a managed run claims it
       this.options.log(`${this.agent} session ${id.slice(0, 8)} in ${cwd ?? '?'}`);
     }
+    this.attach(session, transcript);
     session.lastEvent = this.now();
     if (run !== session.token) this.setToken(session, run);
-    // What hooks don't say: model, branch and the latest thing Claude wrote.
+    // What hooks don't say: model, branch, the latest thing the agent wrote, and for
+    // Codex the files apply_patch changed.
     const state = session.tail?.update();
+    const changes = session.rollout?.update() ?? [];
+    const text = state?.text ?? session.rollout?.text;
     this.change(id, (s) => {
       const model = str(event.model) ?? state?.model;
       if (model) s.model = shortModel(model);
       if (state?.branch) s.branch = state.branch;
-      if (state?.text && state.text !== session.lastText) {
-        session.lastText = state.text;
-        s.say = firstWords(state.text);
+      if (text && text !== session.lastText) {
+        session.lastText = text;
+        s.say = firstWords(text);
       }
+      for (const change of changes) this.recordChange(s, change, cwd);
     });
     return session;
   }
@@ -233,30 +346,37 @@ export class ClaudeSource {
     const session = this.session(event, run);
     const id = session.id;
     const cwd = str(event.cwd);
-    const tool = str(event.tool_name) ?? '';
-    const input = obj(event.tool_input);
+    const raw = { tool: str(event.tool_name) ?? '', input: obj(event.tool_input) };
+    const { tool, input } = this.tools.normalize?.(raw.tool, raw.input) ?? raw;
     switch (event.hook_event_name) {
       case 'SessionStart':
         return NO_DECISION;
       case 'UserPromptSubmit':
+        this.releaseKeyed(session);
         this.change(id, (s) => {
-          const now = this.now();
-          s.state = 'running';
-          s.since = now;
-          s.started = now;
-          if (cwd) s.branch = gitBranch(cwd) ?? s.branch;
-          s.n = { read: 0, edit: 0, new: 0, cmd: 0, add: 0, del: 0 };
-          s.files = [];
-          s.hunks = { total: 0, list: [] };
-          delete s.report;
-          delete s.err;
-          delete s.now;
-          delete s.say; // the last report's words; new ones come from the transcript
+          // Sent while it was still working (queued, or typed mid-turn): part of the same task.
+          const busy = s.state === 'running' || s.state === 'approve' || s.state === 'question';
+          if (!busy) {
+            const now = this.now();
+            s.state = 'running';
+            s.since = now;
+            s.started = now;
+            if (cwd) s.branch = gitBranch(cwd) ?? s.branch;
+            s.n = emptyCounts();
+            s.files = [];
+            s.hunks = { total: 0, list: [] };
+            delete s.report;
+            delete s.err;
+            delete s.now;
+            delete s.say; // the last report's words; new ones come from the transcript
+          }
           this.log(s, { verb: '你', target: firstLine(str(event.prompt) ?? '') });
         });
         return NO_DECISION;
       case 'PreToolUse':
         if (tool === 'AskUserQuestion') return this.holdQuestion(session, input, gone);
+        // The next tool call: the terminal prompt before it has been answered.
+        this.releaseKeyed(session);
         this.change(id, (s) => {
           if (s.state !== 'approve' && s.state !== 'question' && s.state !== 'running') {
             s.state = 'running';
@@ -276,6 +396,8 @@ export class ClaudeSource {
       case 'PostToolUse':
         this.settled(session, tool, input);
         if (tool === 'TodoWrite' || tool === 'AskUserQuestion') return NO_DECISION;
+        // Codex's session file has its file changes, with the exact diff.
+        if (session.rollout && this.tools.isFileTool(tool)) return NO_DECISION;
         this.change(id, (s) => this.record(s, tool, input, event.tool_response, cwd));
         return NO_DECISION;
       case 'PostToolUseFailure':
@@ -317,6 +439,16 @@ export class ClaudeSource {
         return NO_DECISION;
       case 'SessionEnd':
         this.releaseAll(session, '');
+        if (session.token && session.token === run && this.options.runs?.has(session.token)) {
+          // Its terminal is still open (/clear, or the agent is exiting): the run's next
+          // session takes over this entry; if the terminal closes, it goes then.
+          for (const [own, to] of this.aliases) if (to === id) this.aliases.delete(own);
+          session.waiting = true;
+          session.tail = null;
+          session.rollout = null;
+          session.lastText = undefined;
+          return NO_DECISION;
+        }
         // A one-shot run (claude -p) ends right after its report: keep that until it is seen.
         if (this.hub.get(id)?.state === 'done') session.ended = true;
         else this.forget(id);
@@ -329,7 +461,18 @@ export class ClaudeSource {
   /** A finished tool call: log it, count it, keep its file changes. */
   private record(s: SessionSnapshot, tool: string, input: Record<string, unknown>, response: unknown, cwd: string | undefined): void {
     const result = this.tools.resultOf(tool, input, response, cwd);
-    const target = this.tools.targetOf(tool, input, cwd);
+    this.keep(s, tool, this.tools.targetOf(tool, input, cwd), result);
+  }
+
+  /** A Codex apply_patch that completed, from its session file. */
+  private recordChange(s: SessionSnapshot, change: CompletedChange, cwd: string | undefined): void {
+    const { target, result } = changeResult(change.files, cwd);
+    this.keep(s, 'apply_patch', target, result);
+    // It is done: if it is still what the session shows as running, it isn't any more.
+    if (s.now?.verb === 'Edit' && s.state === 'running') delete s.now;
+  }
+
+  private keep(s: SessionSnapshot, tool: string, target: string, result: ToolResult): void {
     this.log(s, {
       verb: this.tools.verbOf(tool),
       target: this.tools.isFileTool(tool) ? baseName(target) : target,
@@ -445,6 +588,11 @@ export class ClaudeSource {
     for (const held of [...session.held].reverse()) this.release(session, held, why);
   }
 
+  /** The agent moved on: whatever prompt was up in its terminal has been answered there. */
+  private releaseKeyed(session: Session): void {
+    for (const held of session.held.filter((h) => h.viaKeys).reverse()) this.release(session, held, ANSWERED_THERE);
+  }
+
   private holdPermission(
     session: Session,
     tool: string,
@@ -457,7 +605,14 @@ export class ClaudeSource {
     const snapshot = this.hub.get(session.id);
     if (!body.why && snapshot?.say) body.why = snapshot.say;
     const req = `r${this.nextReq++}`;
-    return this.hold(session, { req, ask: { kind: 'approve', req, ...body }, tool, target: body.target, input }, gone);
+    const held = { req, ask: { kind: 'approve', req, ...body } as ApproveAsk, tool, target: body.target, input };
+    if (this.options.terminalKeys && session.token && this.options.runs?.has(session.token)) {
+      // The agent would not draw its own prompt while this hook waits. Let it draw it
+      // now; the device answers it by pressing keys in the terminal.
+      void this.hold(session, { ...held, viaKeys: true });
+      return Promise.resolve(NO_DECISION);
+    }
+    return this.hold(session, held, gone);
   }
 
   private holdQuestion(session: Session, input: Record<string, unknown>, gone?: AbortSignal): Promise<PostReply> {
@@ -501,6 +656,30 @@ export class ClaudeSource {
     const session = this.sessions.get(id);
     const head = session?.held[0];
     if (!session || !head || head.req !== req || head.ask.kind !== 'approve') return;
+    if (head.viaKeys) {
+      const keys = this.options.terminalKeys!;
+      const token = session.token;
+      head.finish(NO_DECISION);
+      this.change(id, (s) => {
+        if (!allow) this.log(s, { verb: this.tools.verbOf(head.tool), target: head.target, res: '已拒绝', bad: true });
+      });
+      this.advance(session);
+      const pressed = token ? this.options.runs!.press(token, allow ? keys.allow : keys.deny, keys.expect) : Promise.resolve(false);
+      void pressed.then((ok) => {
+        this.change(id, (s) => {
+          if (!ok) {
+            s.say = '终端里已经没有这个确认框了，没有按';
+          } else if (!allow && s.state === 'running' && session.held.length === 0) {
+            // Saying no to its prompt stops the turn; it waits for the next instruction (and fires no Stop).
+            s.state = 'idle';
+            s.since = this.now();
+            delete s.now;
+            s.say = '已拒绝，它停下来了，等你的下一条指令';
+          }
+        });
+      });
+      return;
+    }
     head.finish({
       status: 200,
       body: {

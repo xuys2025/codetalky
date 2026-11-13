@@ -5,8 +5,10 @@
 import { join } from 'node:path';
 
 import { LIMITS, type FileChange, type Hunk } from '../protocol.ts';
+import { hunksFromPatch, patchStat } from '../claude/text.ts';
 import { isRisky, lineOf, showPath, type AskBody, type Counter, type Input, type ToolKit, type ToolResult } from '../claude/tools.ts';
 import { parsePatch, type PatchFile } from './patch.ts';
+import type { ChangedFile } from './rollout.ts';
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
 const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
@@ -27,6 +29,35 @@ function commandOf(input: Input): string {
 }
 
 const patchOf = (input: Input): PatchFile[] => parsePatch(str(input.command) ?? str(input.input) ?? str(input.patch) ?? '');
+
+/**
+ * Codex runs apply_patch through the shell too (`apply_patch <<'PATCH' ... PATCH`), and
+ * its PreToolUse then says Bash. Show those as the patch they are.
+ */
+function normalize(tool: string, input: Input): { tool: string; input: Input } {
+  if (!isShell(tool)) return { tool, input };
+  const command = commandOf(input);
+  if (!/^\s*(?:cd\s+(?:"[^"]+"|'[^']+'|\S+)\s*(?:&&|;)\s*)?apply_patch\b/.test(command)) return { tool, input };
+  const begin = command.indexOf('*** Begin Patch');
+  const end = command.lastIndexOf('*** End Patch');
+  if (begin < 0 || end < begin) return { tool, input };
+  return { tool: 'apply_patch', input: { command: command.slice(begin, end + '*** End Patch'.length) } };
+}
+
+/** A completed apply_patch from Codex's session file, as the device logs it. */
+export function changeResult(files: ChangedFile[], cwd: string | undefined): { target: string; result: ToolResult } {
+  const result: ToolResult = { hunks: [], files: [], created: files.length > 0 && files.every((f) => f.st === 'A'), add: 0, del: 0 };
+  for (const f of files) {
+    const path = showPath(f.moveTo ?? f.path, cwd);
+    const stat = patchStat(f.hunks);
+    result.add! += stat.add;
+    result.del! += stat.del;
+    result.files.push({ st: f.st, path, add: stat.add, del: stat.del });
+    result.hunks.push(...hunksFromPatch(path, f.hunks));
+  }
+  const first = result.files[0]?.path ?? 'apply_patch';
+  return { target: files.length > 1 ? `${first} 等 ${files.length} 个文件` : first, result };
+}
 
 function verbOf(tool: string): string {
   if (isShell(tool)) return 'Bash';
@@ -126,4 +157,4 @@ function askOf(tool: string, input: Input, cwd: string | undefined): AskBody {
   return ask;
 }
 
-export const codexTools: ToolKit = { verbOf, targetOf, isFileTool, counterOf, resultOf, askOf };
+export const codexTools: ToolKit = { verbOf, targetOf, isFileTool, counterOf, resultOf, askOf, normalize };

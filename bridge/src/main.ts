@@ -14,7 +14,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
-import { ClaudeSource } from './claude/source.ts';
+import { CODEX_KEYS, ClaudeSource } from './claude/source.ts';
 import { claudeHooks, codexHooks, mergeHooks, removeHooks } from './claude/hooks.ts';
 import { codexTools } from './codex/tools.ts';
 import { fastClock, realClock } from './clock.ts';
@@ -181,7 +181,7 @@ function serve(o: ServeOptions): void {
   const runs = new Runs();
   const pairing = new Pairing(join(CONFIG_DIR, 'devices.json'), realClock, log);
   const claude = new ClaudeSource(hub, realClock, { holdSeconds: o.hold, log, runs });
-  const codex = new ClaudeSource(hub, realClock, { holdSeconds: o.hold, log, runs, agent: 'codex', tools: codexTools });
+  const codex = new ClaudeSource(hub, realClock, { holdSeconds: o.hold, log, runs, agent: 'codex', tools: codexTools, terminalKeys: CODEX_KEYS });
   const demoClock = o.speed === 1 ? realClock : fastClock(o.speed);
   const scripts = o.fake === null ? [] : demoScripts().filter((s) => o.fake!.length === 0 || o.fake!.includes(s.initial(0).id));
   const agents = scripts.map((script) => new FakeAgent(hub, demoClock, script));

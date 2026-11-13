@@ -9,6 +9,7 @@ import { ClaudeSource } from '../src/claude/source.ts';
 import { claudeTools, dropCd, isRisky, targetOf } from '../src/claude/tools.ts';
 import { ManualClock } from '../src/clock.ts';
 import { Hub } from '../src/hub.ts';
+import { Runs } from '../src/runs.ts';
 import type { PostReply } from '../src/server.ts';
 
 const T0 = 1_794_637_920;
@@ -348,4 +349,43 @@ test('a file ending in a newline is not counted one line long', () => {
   assert.equal(read('zero\n', 2), '1 行');
   assert.equal(read('a\nb', 2), '2 行');
   assert.equal(read('a\nb\n', 3), '2 行');
+});
+
+test('a managed Claude run keeps one entry on the device across /clear', async () => {
+  const clock = new ManualClock(T0 * 1000);
+  const hub = new Hub(clock);
+  hub.attachDevice();
+  const runs = new Runs();
+  const source = new ClaudeSource(hub, clock, { holdSeconds: 300, log: () => {}, runs });
+  const TOKEN = 'dddddddd-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  const remove = runs.add(TOKEN, 'claude', 'D:\\work\\shop', () => {});
+  const ID = 'run-dddddddd';
+  assert.deepEqual([hub.get(ID)?.name, hub.get(ID)?.reply], ['shop', true]);
+  const send = (sid: string, event: string, extra: Record<string, unknown> = {}) =>
+    source.handle({ session_id: sid, cwd: 'D:\\work\\shop', hook_event_name: event, ...extra }, { 'x-codetalky-run': TOKEN });
+  await send(SID, 'SessionStart', { source: 'startup' });
+  await send(SID, 'UserPromptSubmit', { prompt: '第一件事' });
+  assert.equal(hub.list().length, 1);
+  // /clear: the session ends and a new one starts in the same terminal.
+  await send(SID, 'SessionEnd', { reason: 'clear' });
+  await send('11111111-2222-4333-8444-555555555555', 'SessionStart', { source: 'clear' });
+  await send('11111111-2222-4333-8444-555555555555', 'UserPromptSubmit', { prompt: '第二件事' });
+  assert.deepEqual(hub.list().map((s) => [s.id, s.reply, s.log[0]?.target]), [[ID, true, '第二件事']]);
+  // Claude exits, then its terminal closes.
+  await send('11111111-2222-4333-8444-555555555555', 'SessionEnd', { reason: 'prompt_input_exit' });
+  remove();
+  assert.equal(hub.get(ID), undefined, 'nothing to keep: it was not done');
+  source.stop();
+});
+
+test('an instruction sent while it is working joins that task instead of starting a new one', async () => {
+  const { send, get } = setup();
+  await send('UserPromptSubmit', { prompt: '改上限' });
+  await send('PostToolUse', { tool_name: 'Bash', tool_input: { command: 'npm test' }, tool_response: { stdout: 'ok' } });
+  assert.equal(get().n.cmd, 1);
+  await send('UserPromptSubmit', { prompt: '顺便跑下测试' });
+  assert.deepEqual([get().state, get().n.cmd, get().log[0]!.target, get().log.length], ['running', 1, '顺便跑下测试', 3]);
+  await send('Stop', { last_assistant_message: '好了' });
+  await send('UserPromptSubmit', { prompt: '下一件事' });
+  assert.equal(get().n.cmd, 0, 'a new task after the report starts over');
 });

@@ -36,9 +36,9 @@ export function todosFrom(input: unknown): TranscriptState['todos'] | undefined 
 
 const rank = (status: unknown) => (status === 'completed' ? 0 : status === 'in_progress' ? 1 : 2);
 
-export class TranscriptTail {
+/** Reads a JSONL file incrementally: each update() hands over the lines appended since the last one. */
+export abstract class JsonlTail {
   readonly path: string;
-  readonly state: TranscriptState = {};
   private offset = -1;
   private partial = '';
 
@@ -47,40 +47,52 @@ export class TranscriptTail {
   }
 
   /** Read whatever was appended since last time. Never throws. */
-  update(): TranscriptState {
+  protected read(): void {
     let fd: number;
     try {
       fd = openSync(this.path, 'r');
     } catch {
-      return this.state;
+      return;
     }
     try {
       const size = fstatSync(fd).size;
       if (this.offset < 0) this.offset = Math.max(0, size - FIRST_READ_MAX);
       if (size < this.offset) this.offset = 0; // rewritten
-      if (size === this.offset) return this.state;
+      if (size === this.offset) return;
       const buf = Buffer.alloc(size - this.offset);
       readSync(fd, buf, 0, buf.length, this.offset);
       this.offset = size;
       const lines = (this.partial + buf.toString('utf8')).split('\n');
       this.partial = lines.pop() ?? '';
-      for (const line of lines) this.take(line);
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let entry: Record<string, unknown>;
+        try {
+          entry = JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        this.take(entry);
+      }
     } catch {
       // A transcript we can't read just means less detail on the device.
     } finally {
       closeSync(fd);
     }
+  }
+
+  protected abstract take(entry: Record<string, unknown>): void;
+}
+
+export class TranscriptTail extends JsonlTail {
+  readonly state: TranscriptState = {};
+
+  update(): TranscriptState {
+    this.read();
     return this.state;
   }
 
-  private take(line: string): void {
-    if (!line.trim()) return;
-    let entry: Record<string, unknown>;
-    try {
-      entry = JSON.parse(line) as Record<string, unknown>;
-    } catch {
-      return;
-    }
+  protected take(entry: Record<string, unknown>): void {
     if (typeof entry.gitBranch === 'string' && entry.gitBranch) this.state.branch = entry.gitBranch;
     if (entry.type !== 'assistant') return;
     const message = entry.message as { model?: unknown; content?: unknown } | undefined;
