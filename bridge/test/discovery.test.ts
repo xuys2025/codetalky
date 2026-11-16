@@ -35,6 +35,21 @@ test('a find gets the bridge id, name and WebSocket port back', async () => {
   }
 });
 
+test('a device reporting its battery is logged, not answered', async () => {
+  const lines: string[] = [];
+  const d = await startDiscovery({ port: 0, wsPort: 8137, hostId: 'abc:8137', hostName: 'pc', log: (l) => lines.push(l) });
+  try {
+    const reply = await ask(d.port, '{"t":"diag","mv":3987,"ma":-85,"pct":79,"cap":1200,"ps":"modem","up":120,"heap":150}');
+    assert.equal(reply, null);
+    assert.equal(lines.length, 1);
+    const [line = ''] = lines;
+    assert.match(line, /3\.99 V, draws 85 mA, full battery lasts about 14\.1 h, battery 79%, 1200 mAh/);
+    assert.match(line, /Wi-Fi power saving modem/);
+  } finally {
+    await d.close();
+  }
+});
+
 test('anything that is not a find is ignored', async () => {
   const d = await startDiscovery({ port: 0, wsPort: 8137, hostId: 'abc:8137', hostName: 'pc', log: () => {} });
   try {

@@ -30,8 +30,10 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_pm.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "ssd1677.h"
@@ -57,6 +59,9 @@ static uint8_t *s_ram_a; /* scratch: what goes to the controller's two RAM plane
 static uint8_t *s_ram_b;
 static SemaphoreHandle_t s_lock;
 static TaskHandle_t s_task;
+static esp_pm_lock_handle_t s_busy; /* full CPU speed while converting a frame */
+static EventGroupHandle_t s_state;
+#define EPD_IDLE BIT0 /* nothing pending, no grey pass owed */
 
 /* Guarded by s_lock: */
 static rect_t s_dirty = {0, 0, -1, -1};
@@ -156,6 +161,7 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 
     if (last) {
         s_hint = CT_REFRESH_PARTIAL;
+        xEventGroupClearBits(s_state, EPD_IDLE);
         xTaskNotifyGive(s_task);
     }
     lv_display_flush_ready(disp);
@@ -245,11 +251,13 @@ static bool show_frame(unsigned *partials) {
     s_pending = CT_REFRESH_PARTIAL;
     s_have_frame = false;
     frame_t f = {0};
+    esp_pm_lock_acquire(s_busy);
     if (mode != CT_REFRESH_PARTIAL) {
         f = prepare_full();
     } else if (r.x2 >= 0) {
         f = prepare_partial(&r);
     }
+    esp_pm_lock_release(s_busy);
     xSemaphoreGive(s_lock);
 
     const bool drive = mode == CT_REFRESH_FULL || (mode == CT_REFRESH_FAST && f.changed > 0) ||
@@ -306,6 +314,7 @@ static void overlay(void) {
         xSemaphoreGive(s_lock);
         return;
     }
+    esp_pm_lock_acquire(s_busy);
     memset(s_ram_a, 0, SSD1677_PLANE_BYTES); /* 0x24: dark grey */
     memset(s_ram_b, 0, SSD1677_PLANE_BYTES); /* 0x26: light or dark grey */
     for (int y = 0; y < H; y++) {
@@ -328,6 +337,7 @@ static void overlay(void) {
             s_phys[i] = t;
         }
     }
+    esp_pm_lock_release(s_busy);
     xSemaphoreGive(s_lock);
     if (light + dark == 0) {
         return;
@@ -349,6 +359,9 @@ static void refresh_task(void *arg) {
     unsigned partials = 0;
     bool grey_owed = false;
     for (;;) {
+        if (!grey_owed) {
+            xEventGroupSetBits(s_state, EPD_IDLE);
+        }
         const TickType_t wait = grey_owed ? pdMS_TO_TICKS(OVERLAY_DELAY_MS) : portMAX_DELAY;
         if (ulTaskNotifyTake(pdTRUE, wait) > 0) {
             grey_owed |= show_frame(&partials);
@@ -358,6 +371,10 @@ static void refresh_task(void *arg) {
             overlay();
         }
     }
+}
+
+bool epd_wait_idle(uint32_t timeout_ms) {
+    return (xEventGroupWaitBits(s_state, EPD_IDLE, pdFALSE, pdTRUE, pdMS_TO_TICKS(timeout_ms)) & EPD_IDLE) != 0;
 }
 
 lv_display_t *epd_init(void) {
@@ -371,6 +388,8 @@ lv_display_t *epd_init(void) {
     s_ram_a = heap_caps_malloc(SSD1677_PLANE_BYTES, MALLOC_CAP_SPIRAM);
     s_ram_b = heap_caps_malloc(SSD1677_PLANE_BYTES, MALLOC_CAP_SPIRAM);
     s_lock = xSemaphoreCreateMutex();
+    esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "epd", &s_busy);
+    s_state = xEventGroupCreate();
     if (s_fb == NULL || s_target == NULL || s_phys == NULL || s_plane == NULL || s_shown == NULL || s_grey == NULL ||
         s_ram_a == NULL || s_ram_b == NULL || s_lock == NULL) {
         ESP_LOGE(TAG, "out of memory");

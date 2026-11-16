@@ -21,4 +21,8 @@ lv_display_t *epd_init(void);
 /* The UI's refresh hint for the frame being drawn (strongest one wins). */
 void epd_hint(ct_refresh_t mode);
 
+/* Wait until everything drawn so far is on the panel, grey pass included.
+ * False on timeout. Call from the UI task after lv_refr_now(). */
+bool epd_wait_idle(uint32_t timeout_ms);
+
 #endif /* EPD_H */

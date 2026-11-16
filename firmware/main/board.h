@@ -57,6 +57,13 @@ void board_vibrate(uint16_t ms);
 int board_battery_percent(void);
 void board_battery_poll(void);
 
+/* One fuel gauge reading: battery voltage (mV) and current (mA, negative while the
+ * battery is being drained, positive while it charges). False if unavailable. */
+bool board_battery_sample(int *mv, int *ma);
+
+/* The gauge's idea of the battery's full capacity in mAh, or -1. */
+int board_battery_capacity(void);
+
 /* Switch the device off (does not return). */
 void board_power_off(void);
 

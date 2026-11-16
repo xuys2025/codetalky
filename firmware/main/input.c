@@ -11,6 +11,7 @@
 
 #include "app.h"
 #include "board.h"
+#include "charger.h"
 #include "ct_ui.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -150,6 +151,7 @@ static void input_task(void *arg) {
     /* The power key is often still held from switching the device on: ignore it until released. */
     bool power_armed = gpio_get_level(POWER_KEY_PIN) != 0;
     int64_t power_down_at = 0;
+    int64_t off_asked_at = 0; /* the UI draws a "switched off" page first; if it hangs, go anyway */
     unsigned tick = 0;
     for (;;) {
         touch_sample();
@@ -163,11 +165,17 @@ static void input_task(void *arg) {
             key_update(&power, power_raw);
             if (power.down && !was) {
                 power_down_at = esp_timer_get_time();
-            } else if (power.down && esp_timer_get_time() - power_down_at > POWER_OFF_HOLD_MS * 1000LL) {
+            } else if (power.down && power_down_at != 0 &&
+                       esp_timer_get_time() - power_down_at > POWER_OFF_HOLD_MS * 1000LL) {
+                power_down_at = 0; /* once per hold */
                 board_vibrate(200);
-                vTaskDelay(pdMS_TO_TICKS(300));
-                board_power_off();
+                const app_event_t ev = {.type = APP_EV_POWER_OFF, .a = 0};
+                app_post(&ev);
+                off_asked_at = esp_timer_get_time();
             }
+        }
+        if (off_asked_at != 0 && esp_timer_get_time() - off_asked_at > 10LL * 1000 * 1000) {
+            board_power_off();
         }
         if (tick % 2 == 0) {
             uint16_t xp;
@@ -178,6 +186,13 @@ static void input_task(void *arg) {
         }
         if (tick % 500 == 0) {
             board_battery_poll();
+        }
+        if (tick % 1000 == 0) {
+            int mv, ma;
+            if (board_battery_sample(&mv, &ma) && charger_tick(mv, ma)) {
+                const app_event_t ev = {.type = APP_EV_POWER_OFF, .a = 1};
+                app_post(&ev);
+            }
         }
         tick++;
         vTaskDelay(pdMS_TO_TICKS(SAMPLE_MS));

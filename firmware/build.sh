@@ -44,8 +44,22 @@ if [ "${1:-}" = "clean" ]; then
 fi
 
 cd "$WORK/firmware"
-# sdkconfig lives in the build directory, made from sdkconfig.defaults.
+# main/CMakeLists.txt finds sources with file(GLOB), which CMake only runs when it
+# configures: when files come or go, make it configure again.
+SOURCES="$(cd "$WORK" && ls firmware/main/*.c ui/src/*.c ui/fonts/gen/*.c | sort)"
+if [ "$SOURCES" != "$(cat "$BUILD/.ct-sources" 2>/dev/null)" ]; then
+  touch "$WORK/firmware/main/CMakeLists.txt"
+fi
+# sdkconfig lives in the build directory, made from sdkconfig.defaults. IDF only
+# reads the defaults for options the existing sdkconfig lacks, so start it over
+# whenever the defaults change.
+DEFAULTS_SUM="$(md5sum sdkconfig.defaults | cut -d' ' -f1)"
+if [ "$DEFAULTS_SUM" != "$(cat "$BUILD/.ct-defaults" 2>/dev/null)" ]; then
+  rm -f "$BUILD/sdkconfig"
+fi
 idf.py -B "$BUILD" -D SDKCONFIG="$BUILD/sdkconfig" build
+printf '%s' "$SOURCES" > "$BUILD/.ct-sources"
+echo "$DEFAULTS_SUM" > "$BUILD/.ct-defaults"
 
 # Component versions actually used (idf_component.yml pins LVGL exactly).
 for f in "$WORK"/firmware/managed_components/*/idf_component.yml; do

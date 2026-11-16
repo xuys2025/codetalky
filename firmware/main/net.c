@@ -8,12 +8,15 @@
 #include <string.h>
 
 #include "app.h"
+#include "board.h"
 #include "cJSON.h"
+#include "charger.h"
 #include "ct_model.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_pm.h"
 #include "esp_timer.h"
 #include "esp_websocket_client.h"
 #include "esp_wifi.h"
@@ -45,6 +48,7 @@ typedef struct {
     esp_websocket_client_handle_t ws;
     volatile bool up;
     volatile int64_t down_since; /* ms; when it last went down or was restarted */
+    struct sockaddr_in addr;     /* where its discovery answer came from (diagnostics go there) */
     char *rx; /* frame being assembled (websocket task only) */
     size_t rx_cap;
 } link_t;
@@ -138,8 +142,9 @@ static void wifi_start(void) {
     esp_wifi_set_storage(WIFI_STORAGE_RAM);
     esp_wifi_set_mode(WIFI_MODE_STA);
     ESP_ERROR_CHECK(esp_wifi_start());
-    /* Replies to taps should not wait for the next beacon. Battery tuning comes later. */
-    esp_wifi_set_ps(WIFI_PS_NONE);
+    /* Modem sleep: the radio wakes for every beacon (about 100 ms here), so frames
+     * from the computer wait up to one beacon. 125 -> 77 mA measured. */
+    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
 }
 
 /* ---------- links ---------- */
@@ -303,12 +308,14 @@ static void on_here(const char *text, const struct sockaddr_in *from) {
         const bool stale = esp_timer_get_time() / 1000 - l->down_since > STALE_LINK_MS;
         if (!l->up && (moved || stale)) {
             ESP_LOGI(TAG, "link %d: %s, reconnecting to %s", slot, moved ? "computer moved" : "still down", uri);
+            l->addr = *from;
             link_stop(slot);
             link_start(slot, uri);
         }
     } else if (free_slot >= 0) {
         link_t *l = &s_links[free_slot];
         l->used = true;
+        l->addr = *from;
         snprintf(l->host_id, sizeof(l->host_id), "%s", id->valuestring);
         ESP_LOGI(TAG, "found computer %s at %s: link %d", l->host_id, uri, free_slot);
         link_start(free_slot, uri);
@@ -346,6 +353,78 @@ static bool all_links_up(void) {
     return any;
 }
 
+/* ---------- diagnostics ---------- */
+
+/* Battery readings averaged over DIAG_MS, sent as UDP {"t":"diag"} to every connected
+ * computer's discovery port; the bridge prints them. Works with the USB cable out.
+ *
+ * POWER_EXPERIMENT 1 measures with the cable in: the charger stops drawing from USB
+ * so the device runs on its battery, and every POWER_PHASE_MS the CPU's idle speed
+ * switches between 240 MHz (no frequency scaling) and 80 MHz. Leave it 0 normally:
+ * the battery does not charge while it runs.
+ *
+ * Measured 2026-11-16 (unplugged, demo sessions on screen): Wi-Fi without power
+ * saving 125 mA, with modem sleep 77 mA. */
+#define DIAG_MS 10000
+#define POWER_EXPERIMENT 0
+#define POWER_PHASE_MS 120000
+
+static int s_idle_mhz = 80;
+
+static void diag_tick(int sock, int64_t now) {
+    static int64_t next_sample, next_send, next_phase;
+    static int64_t sum_mv, sum_ma;
+    static int samples;
+    if (next_phase == 0) {
+        next_phase = now + POWER_PHASE_MS;
+        next_send = now + DIAG_MS;
+    }
+#if POWER_EXPERIMENT
+    static bool started;
+    if (!started) {
+        started = true;
+        charger_run_on_battery(true);
+    }
+    if (now >= next_phase) {
+        s_idle_mhz = s_idle_mhz == 80 ? 240 : 80;
+        const esp_pm_config_t pm = {.max_freq_mhz = 240, .min_freq_mhz = s_idle_mhz, .light_sleep_enable = false};
+        esp_pm_configure(&pm);
+        next_phase = now + POWER_PHASE_MS;
+        sum_mv = sum_ma = samples = 0; /* each report covers one mode only */
+        next_send = now + DIAG_MS;
+        ESP_LOGI(TAG, "CPU idles at %d MHz", s_idle_mhz);
+    }
+#endif
+    if (now >= next_sample) {
+        int mv, ma;
+        if (board_battery_sample(&mv, &ma)) {
+            sum_mv += mv;
+            sum_ma += ma;
+            samples++;
+        }
+        next_sample = now + 1000;
+    }
+    if (now < next_send || samples == 0) {
+        return;
+    }
+    bool usb = false;
+    const int chg = charger_status(&usb);
+    char msg[220];
+    const int len = snprintf(msg, sizeof(msg),
+                             "{\"t\":\"diag\",\"mv\":%d,\"ma\":%d,\"pct\":%d,\"cap\":%d,\"ps\":\"%s\",\"chg\":%d,\"usb\":%d,"
+                             "\"up\":%d,\"heap\":%u}",
+                             (int)(sum_mv / samples), (int)(sum_ma / samples), board_battery_percent(),
+                             board_battery_capacity(), s_idle_mhz == 80 ? "modem, cpu idle 80" : "modem, cpu idle 240", chg, usb ? 1 : 0,
+                             (int)(now / 1000), (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024));
+    for (int i = 0; i < CT_MAX_LINKS; i++) {
+        if (s_links[i].used && s_links[i].up) {
+            sendto(sock, msg, len, 0, (struct sockaddr *)&s_links[i].addr, sizeof(s_links[i].addr));
+        }
+    }
+    sum_mv = sum_ma = samples = 0;
+    next_send = now + DIAG_MS;
+}
+
 static void net_task(void *arg) {
     (void)arg;
     int sock = -1;
@@ -377,6 +456,7 @@ static void net_task(void *arg) {
             send_find(sock);
             next_find = now + (all_links_up() ? FIND_SLOW_MS : FIND_FAST_MS);
         }
+        diag_tick(sock, now);
         char buf[512];
         struct sockaddr_in from;
         socklen_t from_len = sizeof(from);

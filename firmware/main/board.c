@@ -5,6 +5,8 @@
  */
 #include "board.h"
 
+#include "charger.h"
+
 #include <string.h>
 
 #include "esp_check.h"
@@ -19,6 +21,9 @@ static const char *TAG = "board";
 #define TCA9555_ADDR 0x20
 #define BQ27220_ADDR 0x55
 #define BQ27220_REG_VOLTAGE 0x08
+#define BQ27220_REG_CURRENT 0x0C       /* signed mA */
+#define BQ27220_REG_FULL_CAPACITY 0x12 /* mAh */
+#define BQ27220_REG_DESIGN_CAPACITY 0x3C
 #define I2C_HZ 400000
 #define I2C_TIMEOUT_MS 50
 
@@ -161,29 +166,78 @@ static void motor_init(void) {
     esp_timer_create(&args, &s_motor_timer);
 }
 
-static bool gauge_millivolts(int *mv) {
-    if (s_gauge == NULL) {
-        return false;
-    }
-    uint8_t reg = BQ27220_REG_VOLTAGE;
+static bool gauge_read16(uint8_t reg, uint16_t *value) {
     uint8_t buf[2];
-    if (i2c_master_transmit_receive(s_gauge, &reg, 1, buf, 2, I2C_TIMEOUT_MS) != ESP_OK) {
+    if (s_gauge == NULL || i2c_master_transmit_receive(s_gauge, &reg, 1, buf, 2, I2C_TIMEOUT_MS) != ESP_OK) {
         return false;
     }
-    *mv = buf[0] | (buf[1] << 8);
+    *value = (uint16_t)(buf[0] | (buf[1] << 8));
+    return true;
+}
+
+static bool gauge_millivolts(int *mv) {
+    uint16_t v;
+    if (!gauge_read16(BQ27220_REG_VOLTAGE, &v)) {
+        return false;
+    }
+    *mv = v;
     return *mv > 2000 && *mv < 5000;
 }
 
+bool board_battery_sample(int *mv, int *ma) {
+    uint16_t current;
+    if (!gauge_millivolts(mv) || !gauge_read16(BQ27220_REG_CURRENT, &current)) {
+        return false;
+    }
+    *ma = (int16_t)current;
+    return true;
+}
+
+int board_battery_capacity(void) {
+    uint16_t full, design;
+    if (gauge_read16(BQ27220_REG_FULL_CAPACITY, &full) && full > 0 && full < 20000) {
+        return full;
+    }
+    if (gauge_read16(BQ27220_REG_DESIGN_CAPACITY, &design) && design > 0 && design < 20000) {
+        return design;
+    }
+    return -1;
+}
+
+/* Charge shown to the user, as the vendor firmware does it (docs/battery-soc-and-charge.md
+ * in its repo; the gauge's own state of charge is not calibrated): voltage mapped
+ * linearly, averaged, and then only allowed to move the way the current flows, at most
+ * 1% per 30 s. Charging current lifts the voltage (75% read as 87% right after plugging
+ * in); without these rules the number jumps. */
 void board_battery_poll(void) {
-    int mv;
-    if (!gauge_millivolts(&mv)) {
+    static int64_t last_step;
+    int mv, ma;
+    if (!board_battery_sample(&mv, &ma)) {
         return;
     }
-    /* Smooth over about a minute of readings: load (the panel, Wi-Fi) makes it jump. */
+    /* Take out the drop across the cell's resistance (about 0.2 ohm going by the jump
+     * seen when plugging in: +130 mV at +500 mA, part of it the charger's own rise). */
+    mv -= ma / 5;
     s_battery_mv_avg = s_battery_mv_avg == 0 ? mv * 16 : s_battery_mv_avg - s_battery_mv_avg / 16 + mv;
     const int avg = s_battery_mv_avg / 16;
-    int pct = (avg - BATTERY_EMPTY_MV) * 100 / (BATTERY_FULL_MV - BATTERY_EMPTY_MV);
-    s_battery = pct < 0 ? 0 : pct > 100 ? 100 : pct;
+    int target = (avg - BATTERY_EMPTY_MV) * 100 / (BATTERY_FULL_MV - BATTERY_EMPTY_MV);
+    target = target < 0 ? 0 : target > 100 ? 100 : target;
+    if (s_battery < 0) {
+        s_battery = target; /* first reading after boot */
+        last_step = esp_timer_get_time();
+        return;
+    }
+    const int64_t now = esp_timer_get_time();
+    if (now - last_step < 30LL * 1000 * 1000) {
+        return;
+    }
+    if (ma > 5 && target > s_battery) {
+        s_battery++;
+        last_step = now;
+    } else if (ma < -5 && target < s_battery) {
+        s_battery--;
+        last_step = now;
+    }
 }
 
 int board_battery_percent(void) {
@@ -233,4 +287,5 @@ void board_init(void) {
     } else {
         ESP_LOGW(TAG, "no fuel gauge");
     }
+    charger_init(s_bus);
 }

@@ -12,6 +12,7 @@ typedef enum {
     APP_EV_KEY,  /* a = ct_key_t, b = 1 down / 0 up */
     APP_EV_LINK, /* a = link, b = 1 up / 0 down */
     APP_EV_MSG,  /* a = link, text/len = one frame (malloc'd; the UI task frees it) */
+    APP_EV_POWER_OFF, /* a = 0 the user held the power key, 1 the battery is empty */
 } app_ev_type_t;
 
 typedef struct {

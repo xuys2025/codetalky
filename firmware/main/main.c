@@ -5,10 +5,13 @@
  */
 #include "app.h"
 #include "board.h"
+#include "charger.h"
+#include "ct_widgets.h"
 #include "ct_ui.h"
 #include "epd.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_pm.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -20,6 +23,7 @@
 
 static const char *TAG = "main";
 static QueueHandle_t s_queue;
+static esp_pm_lock_handle_t s_busy; /* full CPU speed while the UI works */
 
 bool app_post(const app_event_t *ev) {
     if (s_queue != NULL && xQueueSend(s_queue, ev, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -34,6 +38,26 @@ static uint32_t tick_ms(void) {
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
+/* A last page, since e-ink keeps showing whatever was on it, then power off. */
+static void power_off(bool battery_empty) {
+    ESP_LOGW(TAG, "%s", battery_empty ? "battery empty: switching off" : "switching off");
+    lv_obj_t *screen = ct_screen_new();
+    lv_obj_set_flex_align(screen, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(screen, 16, 0);
+    ct_label(screen, B24, battery_empty ? "电量用完了，已关机" : "已关机");
+    ct_label(screen, F20, battery_empty ? "插上充电线再开机" : "按电源键开机");
+    epd_hint(CT_REFRESH_FULL);
+    lv_screen_load(screen);
+    lv_refr_now(NULL);
+    if (!epd_wait_idle(5000)) {
+        ESP_LOGW(TAG, "panel still busy; switching off anyway");
+    }
+    if (battery_empty) {
+        charger_battery_off();
+    }
+    board_power_off();
+}
+
 static void handle(app_event_t *ev) {
     switch (ev->type) {
     case APP_EV_KEY:
@@ -45,6 +69,9 @@ static void handle(app_event_t *ev) {
     case APP_EV_MSG:
         ct_ui_on_message(ev->a, ev->text, ev->len);
         free(ev->text);
+        break;
+    case APP_EV_POWER_OFF:
+        power_off(ev->a == 1);
         break;
     }
 }
@@ -62,16 +89,20 @@ static void ui_task(void *arg) {
              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
 
     for (;;) {
+        esp_pm_lock_acquire(s_busy);
         uint32_t wait = lv_timer_handler();
+        esp_pm_lock_release(s_busy);
         if (wait > 50) wait = 50;
         if (wait < 2) wait = 2;
         app_event_t ev;
         if (xQueueReceive(s_queue, &ev, pdMS_TO_TICKS(wait)) == pdTRUE) {
+            esp_pm_lock_acquire(s_busy);
             handle(&ev);
             /* A burst (the session list after connecting) goes in before the next draw. */
             for (int i = 0; i < 32 && xQueueReceive(s_queue, &ev, 0) == pdTRUE; i++) {
                 handle(&ev);
             }
+            esp_pm_lock_release(s_busy);
         }
     }
 }
@@ -82,6 +113,14 @@ void app_main(void) {
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "NVS init failed: %s (settings will not persist)", esp_err_to_name(err));
     }
+    /* Idle at 80 MHz (APB stays at 80, so USB, SPI and I2C are unaffected); no light
+     * sleep yet: it needs touch and keys to wake the chip, still to do. */
+    const esp_pm_config_t pm = {.max_freq_mhz = 240, .min_freq_mhz = 80, .light_sleep_enable = false};
+    err = esp_pm_configure(&pm);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "power management: %s", esp_err_to_name(err));
+    }
+    esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "ui", &s_busy);
     board_init();
     s_queue = xQueueCreate(64, sizeof(app_event_t));
     xTaskCreatePinnedToCore(ui_task, "ui", 16 * 1024, NULL, 3, NULL, 1);
