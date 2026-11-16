@@ -1,7 +1,7 @@
 {
   "out_dir": "ui/fonts/gen",
   "scan": ["ui/src", "bridge/src"],
-  "extra": "√",
+  "extra": "√①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ≤≥≈≠¥℃§↔／＋├┤┬┴┼└┘┌┐█▀▄░▒▓",
   "charset": "ui/fonts/charset.txt",
   "fonts": [
     { "name": "ct_font_text_18", "path": "third_party/fonts/sarasa-ui-sc/SarasaUiSC-Regular.ttf", "size": 18, "hinting": "native", "cjk": true },
@@ -11,6 +11,8 @@
     { "name": "ct_font_mono_18", "path": "third_party/fonts/jetbrains-mono/JetBrainsMono-Medium.ttf", "size": 18, "fallback": "ct_font_text_18" },
     { "name": "ct_font_mono_20", "path": "third_party/fonts/jetbrains-mono/JetBrainsMono-Medium.ttf", "size": 20, "fallback": "ct_font_text_20" },
     { "name": "ct_font_monob_20", "path": "third_party/fonts/jetbrains-mono/JetBrainsMono-ExtraBold.ttf", "size": 20, "fallback": "ct_font_bold_20" },
-    { "name": "ct_font_monob_24", "path": "third_party/fonts/jetbrains-mono/JetBrainsMono-ExtraBold.ttf", "size": 24, "fallback": "ct_font_bold_24" }
+    { "name": "ct_font_monob_24", "path": "third_party/fonts/jetbrains-mono/JetBrainsMono-ExtraBold.ttf", "size": 24, "fallback": "ct_font_bold_24" },
+    { "name": "ct_font_monob_32", "path": "third_party/fonts/jetbrains-mono/JetBrainsMono-ExtraBold.ttf", "size": 32, "chars": "·", "fallback": "ct_font_bold_32" },
+    { "name": "ct_font_bold_32", "path": "third_party/fonts/sarasa-ui-sc/SarasaUiSC-SemiBold.ttf", "size": 32, "hinting": "native", "chars": "·，电量关机已用完了" }
   ]
 }

@@ -46,6 +46,7 @@ typedef enum {
     SCR_DIFF,  /* the whole change a permission request would make */
     SCR_PAIR,  /* a computer wants this device to pair */
     SCR_PLAN,  /* a plan to approve or send back */
+    SCR_LISTEN, /* recording, or waiting for what the computer heard */
 } screen_id_t;
 
 /* What the reply screen's words are for. */
@@ -96,11 +97,19 @@ static struct {
 } s_links[CT_MAX_LINKS];
 static bool s_resynced; /* everything was just re-sent: the next redraw replaces the whole page */
 
+/* Where to go once an action is through. */
+typedef enum {
+    THEN_SESSION, /* stay with the session: its next request, or what it is doing */
+    THEN_DETAIL,  /* what it is doing (after an instruction: watch it carry it out) */
+    THEN_LIST,    /* back to all sessions (a report put away) */
+} then_t;
+
 /* An action waiting for its ack. */
 static struct {
     uint32_t seq;
     int link;
     uint32_t sent_at;
+    then_t then;
 } s_pending;
 
 /* What the current screen was drawn from. When it changes, the screen is redrawn. */
@@ -119,8 +128,26 @@ static uint32_t s_announced[CT_MAX_SESSIONS];
 static int s_announced_count;
 static uint32_t s_announced_rev;
 
-/* Placeholder until speech recognition exists (phase 3). */
+/* What the computer heard, shown on the voice screen for confirmation. Platforms
+ * without a microphone (the simulator) show this sample instead. */
+static char s_heard_buf[CT_HEARD_MAX];
 static const char *s_heard = "把刚才失败的两个测试修好，然后重新跑一遍。";
+
+/* Talking: recording while the talk key is held, then waiting for the words. */
+#define VOICE_MAX_MS 60000      /* a longer recording is cut here */
+#define VOICE_MIN_PARTS 6       /* 0.3 s: anything shorter was a slip */
+#define HEARD_TIMEOUT_MS 20000  /* the computer should have answered by then */
+static struct {
+    bool listening;
+    bool waiting;  /* the recording is out; waiting for what was heard */
+    bool by_touch; /* held on the screen (else the BOOT key): ends when the finger lifts */
+    int link;
+    char id[CT_ID_MAX];
+    uint32_t n;     /* recording number */
+    uint32_t parts; /* sent so far */
+    uint32_t since;
+    const char *failed; /* why the last try came to nothing, shown on the listen screen */
+} s_voice;
 
 static void show_list(void);
 static void show_detail(void);
@@ -129,6 +156,8 @@ static void show_question(void);
 static void show_done(void);
 static void show_reply(void);
 static void show_voice(void);
+static void show_listen(void);
+static void voice_begin(bool by_touch);
 static void show_entry(void);
 static void show_diff(void);
 static void show_pair(void);
@@ -382,6 +411,16 @@ static const char *ack_text(ct_ack_t ack) {
 
 static void present(lv_obj_t *screen, screen_id_t id) {
     lv_obj_t *old = lv_screen_active();
+    if (id != SCR_LISTEN) {
+        /* Leaving the listen screen any way at all ends talking: no stray recording,
+         * and no recognised words popping up later. */
+        if (s_voice.listening) {
+            ct_hal_mic_stop();
+            s_voice.listening = false;
+            ct_proto_voice_end(s_voice.link, s_voice.id, s_voice.n, s_voice.parts, true);
+        }
+        s_voice.waiting = false;
+    }
     if (id != SCR_LIST) {
         s_banner = NULL;
     }
@@ -447,6 +486,34 @@ static void agent_meta(lv_obj_t *screen, const ct_session_t *s, const char *righ
 }
 
 /* A paragraph cut to max_lines, ending in dots. */
+/* A wrapping label of at most max lines: the rest goes into "…". Can be called again
+ * with another limit (the label keeps its whole text). */
+static void fit_lines(lv_obj_t *label, const lv_font_t *font, int max_lines) {
+    lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_height(label, LV_SIZE_CONTENT);
+    lv_obj_update_layout(label);
+    const int32_t space = lv_obj_get_style_text_line_space(label, 0);
+    const int32_t line = lv_font_get_line_height(font) + space;
+    if (lv_obj_get_height(label) > line * max_lines) {
+        lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_DOTS);
+        lv_obj_set_height(label, line * max_lines - space);
+    }
+}
+
+/* Option descriptions in at most this many lines; 0 hides them. */
+static void fit_descs(lv_obj_t *const *descs, int lines) {
+    for (int i = 0; i < CT_ASK_OPTIONS; i++) {
+        if (descs[i] == NULL) {
+            continue;
+        }
+        if (lines == 0) {
+            lv_obj_add_flag(descs[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            fit_lines(descs[i], F18, lines);
+        }
+    }
+}
+
 static lv_obj_t *short_paragraph(lv_obj_t *parent, const lv_font_t *font, const char *text, int max_lines) {
     lv_obj_t *label = ct_paragraph(parent, font, text);
     const int32_t line = lv_font_get_line_height(font) + 3;
@@ -483,13 +550,27 @@ static void session_gone(void) {
 static void finish_action(ct_ack_t ack) {
     s_pending.seq = 0;
     s_next_refresh = CT_REFRESH_FAST;
+    const ct_session_t *s = current();
+    if (ack == CT_ACK_OK && s != NULL && s_pending.then != THEN_LIST) {
+        /* Stay with the session, to watch it carry on (2026-11-16: going back to the
+         * list after every instruction lost the conversation). */
+        s_tab = 0;
+        s_page = 0;
+        if (s_pending.then == THEN_DETAIL) {
+            show_detail();
+        } else {
+            open_session(s);
+        }
+        return;
+    }
     s_banner = ack_text(ack);
     show_list();
 }
 
 /* After a tap the screen stays put until the bridge answers (usually within tens of
- * milliseconds), then goes to the list in one refresh showing the new state. */
-static void await_ack(uint32_t seq) {
+ * milliseconds), then moves on in one refresh showing the new state. */
+static void await_ack_then(uint32_t seq, then_t then) {
+    s_pending.then = then;
     if (seq == 0) {
         finish_action(ct_proto_link_up(s_sel.link) ? CT_ACK_BAD : CT_ACK_OFFLINE);
         return;
@@ -497,6 +578,10 @@ static void await_ack(uint32_t seq) {
     s_pending.seq = seq;
     s_pending.link = s_sel.link;
     s_pending.sent_at = lv_tick_get();
+}
+
+static void await_ack(uint32_t seq) {
+    await_ack_then(seq, THEN_SESSION);
 }
 
 static void on_back_list(lv_event_t *e) { (void)e; show_list(); }
@@ -524,13 +609,24 @@ static void on_open_reply(lv_event_t *e) {
     open_reply(REPLY_SAY);
 }
 
-/* Send the user's words where the reply screen was opened for. */
-static void send_words(const char *text) {
+/* Send the user's words where the reply screen was opened for. An instruction while
+ * the agent works steers it (it reads the words after its current step); stop
+ * interrupts it first. Afterwards the screen stays with the session, to watch. */
+static void send_words_how(const char *text, ct_reply_how_t how) {
     switch (s_reply_mode) {
     case REPLY_ANSWER: await_ack(ct_proto_answer_text(s_sel.link, s_sel.id, s_req, text)); break;
     case REPLY_PLAN: await_ack(ct_proto_send_back(s_sel.link, s_sel.id, s_req, text)); break;
-    default: await_ack(ct_proto_reply(s_sel.link, s_sel.id, text)); break;
+    default: await_ack_then(ct_proto_reply(s_sel.link, s_sel.id, text, how), THEN_DETAIL); break;
     }
+}
+
+static void send_words(const char *text) {
+    send_words_how(text, CT_REPLY_NOW);
+}
+
+/* Working on something: an instruction now steers it, or (打断) stops it. */
+static bool is_working(const ct_session_t *s) {
+    return s->state == CT_STATE_RUNNING || s->state == CT_STATE_WAIT_APPROVE || s->state == CT_STATE_WAIT_ANSWER;
 }
 
 /* ---------- session list ---------- */
@@ -1421,16 +1517,21 @@ static void show_question(void) {
     lv_obj_set_style_pad_top(content, 10, 0);
 
     ct_section(content, "它问你");
-    short_paragraph(content, B24, ask->text, 3);
+    lv_obj_t *question = short_paragraph(content, B24, ask->text, 3);
     if (ask->note != NULL) {
         short_paragraph(content, F20, ask->note, 3);
     }
 
+    /* Options as tall as their words. The page doesn't scroll: to fit, descriptions
+     * get 3 lines, fewer, or none, and last the question gets 2. */
+    lv_obj_t *descs[CT_ASK_OPTIONS] = {0};
     int picked = 0;
-    for (int i = 0; i < ask->option_count; i++) {
+    for (int i = 0; i < ask->option_count && i < CT_ASK_OPTIONS; i++) {
         const bool ticked = ask->multi && (s_picked & (1u << i)) != 0;
         picked += ticked ? 1 : 0;
-        lv_obj_t *opt = ct_row(content, 88, 14, 14);
+        lv_obj_t *opt = ct_row(content, LV_SIZE_CONTENT, 14, 14);
+        lv_obj_set_style_min_height(opt, 72, 0);
+        lv_obj_set_style_pad_ver(opt, 10, 0);
         ct_border(opt, 3, LV_BORDER_SIDE_FULL);
         lv_obj_t *num = ct_box(opt);
         lv_obj_set_size(num, 48, 48);
@@ -1448,12 +1549,11 @@ static void show_question(void) {
         lv_obj_t *text = ct_col(opt, 0, 2);
         lv_obj_set_flex_grow(text, 1);
         lv_obj_t *label = ct_label(text, B20, ask->options[i].label);
-        lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_DOTS);
         lv_obj_set_width(label, LV_PCT(100));
+        fit_lines(label, B20, 2);
         if (ask->options[i].desc != NULL) {
-            lv_obj_t *desc = ct_label(text, F18, ask->options[i].desc);
-            lv_label_set_long_mode(desc, LV_LABEL_LONG_MODE_DOTS);
-            lv_obj_set_width(desc, LV_PCT(100));
+            descs[i] = ct_label(text, F18, ask->options[i].desc);
+            lv_obj_set_width(descs[i], LV_PCT(100));
         }
         ct_tappable(opt, ask->multi ? on_pick : on_option, (void *)(intptr_t)i);
     }
@@ -1471,6 +1571,16 @@ static void show_question(void) {
         lv_obj_set_flex_align(hint, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         ct_label(hint, F18, "点一个选项，就直接发给它");
     }
+    int lines = 3;
+    fit_descs(descs, lines);
+    lv_obj_update_layout(screen);
+    while (lv_obj_get_scroll_bottom(content) > 0 && lines > 0) {
+        fit_descs(descs, --lines);
+        lv_obj_update_layout(screen);
+    }
+    if (lv_obj_get_scroll_bottom(content) > 0) {
+        fit_lines(question, B24, 2);
+    }
     present(screen, SCR_QUESTION);
 }
 
@@ -1478,7 +1588,7 @@ static void show_question(void) {
 
 static void on_dismiss(lv_event_t *e) {
     (void)e;
-    await_ack(ct_proto_seen(s_sel.link, s_sel.id));
+    await_ack_then(ct_proto_seen(s_sel.link, s_sel.id), THEN_LIST);
 }
 
 static void report_para(lv_obj_t *parent, const ct_para_t *p) {
@@ -1716,6 +1826,11 @@ static void on_quick(lv_event_t *e) {
     }
 }
 
+static void on_stop_it(lv_event_t *e) {
+    (void)e;
+    send_words_how("", CT_REPLY_STOP);
+}
+
 static void on_send_back_plain(lv_event_t *e) {
     (void)e;
     await_ack(ct_proto_send_back(s_sel.link, s_sel.id, s_req, NULL));
@@ -1723,7 +1838,7 @@ static void on_send_back_plain(lv_event_t *e) {
 
 static void on_hold_to_talk(lv_event_t *e) {
     (void)e;
-    show_voice();
+    voice_begin(true);
 }
 
 static void show_reply(void) {
@@ -1750,8 +1865,16 @@ static void show_reply(void) {
         ct_label(plain, MB24, "›");
         ct_tappable(plain, on_send_back_plain, NULL);
     }
+    if (s_reply_mode == REPLY_SAY && is_working(s)) {
+        /* Interrupt it, with no new words: it stops and waits. */
+        lv_obj_t *stop = ct_row(content, 60, 14, 8);
+        ct_invert(stop);
+        ct_label_fill(stop, B20, "让它停下");
+        ct_label(stop, F18, "打断");
+        ct_tappable(stop, on_stop_it, NULL);
+    }
     if (ct_model_quick_count(s->link) > 0) {
-        ct_section(content, "点一句直接发");
+        ct_section(content, is_working(s) && s_reply_mode == REPLY_SAY ? "点一句插话" : "点一句直接发");
     }
     for (int i = 0; i < ct_model_quick_count(s->link); i++) {
         lv_obj_t *q = ct_row(content, 60, 14, 8);
@@ -1768,7 +1891,8 @@ static void show_reply(void) {
     ct_invert(talk);
     ct_label(talk, B24, "按住这里说话");
     ct_label(talk, F18, "松开后先显示识别出的文字，确认了再发");
-    ct_tappable(talk, on_hold_to_talk, NULL);
+    ct_tappable(talk, NULL, NULL);
+    lv_obj_add_event_cb(talk, on_hold_to_talk, LV_EVENT_PRESSED, NULL);
 
     lv_obj_t *hint = ct_row(screen, 44, CT_PAD, 0);
     lv_obj_set_flex_align(hint, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -1778,10 +1902,168 @@ static void show_reply(void) {
     } else if (s_reply_mode == REPLY_PLAN) {
         note = "计划会打回给它，按这句话改";
     } else if (s->state == CT_STATE_RUNNING) {
-        note = "它正在干活，这句话等它做完这一轮再发";
+        note = "它正在干活：它做完手上这一步就会看到这句话";
     }
     ct_label(hint, F18, note);
     present(screen, SCR_REPLY);
+}
+
+/* ---------- talking ---------- */
+
+/* Start recording for the session on screen. Without a microphone (the simulator)
+ * the voice screen shows its sample words instead. */
+static void voice_begin(bool by_touch) {
+    const ct_session_t *s = current();
+    if (s == NULL || s_voice.listening) {
+        return;
+    }
+    if (!ct_hal_mic_start()) {
+        show_voice();
+        return;
+    }
+    s_voice.listening = true;
+    s_voice.waiting = false;
+    s_voice.by_touch = by_touch;
+    s_voice.link = s->link;
+    snprintf(s_voice.id, sizeof(s_voice.id), "%s", s->id);
+    s_voice.n++;
+    s_voice.parts = 0;
+    s_voice.since = lv_tick_get();
+    s_voice.failed = NULL;
+    if (!by_touch) {
+        ct_hal_vibrate(35); /* the on-screen key buzzes by itself */
+    }
+    show_listen();
+}
+
+static void voice_failed(const char *why) {
+    if (s_screen == SCR_LISTEN) {
+        s_next_refresh = CT_REFRESH_PARTIAL;
+    }
+    s_voice.listening = false;
+    s_voice.waiting = false;
+    s_voice.failed = why;
+    show_listen();
+}
+
+/* The talk key was let go (or the recording hit its limit): send it off, or drop it. */
+static void voice_end(bool cancel) {
+    if (!s_voice.listening) {
+        return;
+    }
+    ct_hal_mic_stop();
+    s_voice.listening = false;
+    if (cancel || s_voice.parts < VOICE_MIN_PARTS) {
+        ct_proto_voice_end(s_voice.link, s_voice.id, s_voice.n, s_voice.parts, true);
+        if (cancel) {
+            show_reply();
+        } else {
+            voice_failed("太短了：按住，说完再松开");
+        }
+        return;
+    }
+    if (!ct_proto_voice_end(s_voice.link, s_voice.id, s_voice.n, s_voice.parts, false)) {
+        voice_failed("连接断了，没发出去");
+        return;
+    }
+    s_voice.waiting = true;
+    s_voice.since = lv_tick_get();
+    s_next_refresh = CT_REFRESH_PARTIAL; /* same page, one box changes: half the time of a fast refresh */
+    show_listen();
+}
+
+void ct_ui_on_audio(const int16_t *pcm, size_t samples) {
+    if (!s_voice.listening) {
+        return;
+    }
+    if (!ct_proto_voice(s_voice.link, s_voice.id, s_voice.n, s_voice.parts, pcm, samples)) {
+        ct_hal_mic_stop();
+        voice_failed("连接断了，没发出去");
+        return;
+    }
+    s_voice.parts++;
+    if (lv_tick_elaps(s_voice.since) >= VOICE_MAX_MS) {
+        voice_end(false);
+    }
+}
+
+static void on_heard(int link, uint32_t n) {
+    if (!s_voice.waiting || link != s_voice.link || n != s_voice.n) {
+        return; /* an older recording, or one given up on */
+    }
+    s_voice.waiting = false;
+    const char *text = ct_proto_heard_text();
+    if (text == NULL) {
+        const char *err = ct_proto_heard_err();
+        voice_failed(strcmp(err, "empty") == 0  ? "没听到说话，再说一次"
+                     : strcmp(err, "lost") == 0 ? "声音没传完整，再说一次"
+                                                : "识别出错了，再说一次");
+        return;
+    }
+    snprintf(s_heard_buf, sizeof(s_heard_buf), "%s", text);
+    s_heard = s_heard_buf;
+    show_voice();
+}
+
+/* Called on every poll: the finger lifted, or the computer took too long. */
+static void voice_poll(void) {
+    if (s_voice.listening && s_voice.by_touch && !input_pressed()) {
+        voice_end(false);
+    } else if (s_voice.waiting && lv_tick_elaps(s_voice.since) >= HEARD_TIMEOUT_MS) {
+        voice_failed("电脑没回应，再说一次");
+    }
+}
+
+static void on_listen_back(lv_event_t *e) {
+    (void)e;
+    if (s_voice.listening) {
+        voice_end(true);
+        return;
+    }
+    s_voice.waiting = false; /* whatever comes back now is ignored */
+    s_voice.failed = NULL;
+    show_reply();
+}
+
+static void show_listen(void) {
+    const ct_session_t *s = current();
+    if (s == NULL) {
+        if (s_voice.listening) {
+            voice_end(true);
+        }
+        session_gone();
+        return;
+    }
+    lv_obj_t *screen = ct_screen_new();
+    status_bar(screen);
+    lv_obj_t *nav = ct_nav(screen, s->name, on_listen_back);
+    ct_chip(nav, "语音", false, true);
+    agent_meta(screen, s, s_voice.listening ? "录音中" : s_voice.waiting ? "识别中" : "没听清");
+
+    lv_obj_t *content = ct_content(screen, CT_PAD);
+    lv_obj_set_flex_align(content, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(content, 14, 0);
+    lv_obj_t *box = ct_col(content, 0, 8);
+    lv_obj_set_height(box, 160);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    if (s_voice.listening) {
+        ct_invert(box);
+        ct_label(box, B24, "正在听");
+        ct_label(box, F20, s_voice.by_touch ? "说完松开手指" : "说完松开 BOOT 键");
+    } else if (s_voice.waiting) {
+        ct_border(box, 3, LV_BORDER_SIDE_FULL);
+        ct_label(box, B24, "正在识别");
+        ct_label(box, F20, "识别出的文字确认了再发");
+    } else {
+        ct_border(box, 3, LV_BORDER_SIDE_FULL);
+        ct_label(box, B24, "没听清");
+        ct_paragraph(box, F20, s_voice.failed != NULL ? s_voice.failed : "再说一次");
+        lv_obj_set_style_text_align(lv_obj_get_child(box, -1), LV_TEXT_ALIGN_CENTER, 0);
+    }
+    if (!s_voice.listening && !s_voice.waiting) {
+        ct_label(content, F18, "按住机身上的 BOOT 键再说一次");
+    }
+    present(screen, SCR_LISTEN);
 }
 
 /* ---------- voice confirmation ---------- */
@@ -1789,6 +2071,11 @@ static void show_reply(void) {
 static void on_send(lv_event_t *e) {
     (void)e;
     send_words(s_heard);
+}
+
+static void on_send_stop(lv_event_t *e) {
+    (void)e;
+    send_words_how(s_heard, CT_REPLY_STOP);
 }
 
 static void show_voice(void) {
@@ -1826,7 +2113,9 @@ static void show_voice(void) {
     }
 
     ct_section(content, "发出去之后");
-    const char *after = s->state == CT_STATE_RUNNING ? "它正在干活：这句话等它做完这一轮再发过去，不会打断它。" : "它会马上开始按这句话去做。";
+    const bool working = is_working(s);
+    const char *after = working ? "它正在干活：「发送」是插一句，它做完手上这一步就会看到，按这句调整；「打断」让它马上停下，改做这件事。"
+                                : "它会马上开始按这句话去做。";
     if (s_reply_mode == REPLY_ANSWER) {
         after = "作为这道题的回答发给它，它接着往下做。";
     } else if (s_reply_mode == REPLY_PLAN) {
@@ -1838,6 +2127,10 @@ static void show_voice(void) {
     lv_obj_set_style_pad_column(bar, 12, 0);
     lv_obj_t *redo = ct_button(bar, "重说", B24, 100, 64, false, on_back_reply, NULL);
     lv_obj_set_flex_grow(redo, 1);
+    if (s_reply_mode == REPLY_SAY && working) {
+        lv_obj_t *stop = ct_button(bar, "打断", B24, 100, 64, false, on_send_stop, NULL);
+        lv_obj_set_flex_grow(stop, 1);
+    }
     lv_obj_t *send = ct_button(bar, "发送", B24, 100, 64, true, on_send, NULL);
     lv_obj_set_flex_grow(send, 1);
     present(screen, SCR_VOICE);
@@ -2072,6 +2365,7 @@ static void follow_data(void) {
     case SCR_PAIR: show_pair(); break;
     case SCR_REPLY: show_reply(); break;
     case SCR_VOICE: show_voice(); break;
+    case SCR_LISTEN: show_listen(); break;
     default: show_detail(); break;
     }
 }
@@ -2089,6 +2383,7 @@ static void forget_lost_links(void) {
 static void on_poll(lv_timer_t *timer) {
     (void)timer;
     forget_lost_links();
+    voice_poll();
     /* The computer forgets a pairing code after five minutes: ask with a new one first. */
     if (s_screen == SCR_PAIR && s_pair_link >= 0 && lv_tick_elaps(s_pair_since) >= PAIR_REFRESH_MS) {
         ct_proto_pair_again(s_pair_link);
@@ -2135,6 +2430,12 @@ void ct_ui_on_link(int link, bool up) {
     if (!up && s_pending.seq != 0 && s_pending.link == link) {
         finish_action(CT_ACK_OFFLINE);
     }
+    if (!up && (s_voice.listening || s_voice.waiting) && s_voice.link == link) {
+        if (s_voice.listening) {
+            ct_hal_mic_stop();
+        }
+        voice_failed("连接断了，再说一次");
+    }
 }
 
 void ct_ui_on_message(int link, const char *json, size_t len) {
@@ -2153,6 +2454,7 @@ void ct_ui_on_message(int link, const char *json, size_t len) {
         break;
     case CT_EV_BAD_PROTO: s_links[link].bad_proto = true; break;
     case CT_EV_PAIRING: start_pairing(link); break;
+    case CT_EV_HEARD: on_heard(link, ev.seq); break;
     case CT_EV_ACK:
         if (s_pending.seq != 0 && s_pending.link == link && ev.seq == s_pending.seq) {
             finish_action(ev.ack);
@@ -2163,6 +2465,12 @@ void ct_ui_on_message(int link, const char *json, size_t len) {
 }
 
 void ct_ui_on_key(ct_key_t key, bool down) {
+    if (key == CT_KEY_BOOT && !down) {
+        if (s_voice.listening && !s_voice.by_touch) {
+            voice_end(false);
+        }
+        return;
+    }
     if (!down || s_pending.seq != 0) {
         return;
     }
@@ -2192,7 +2500,7 @@ void ct_ui_on_key(ct_key_t key, bool down) {
         if (s_screen == SCR_LIST || s == NULL) {
             break;
         }
-        if (s_screen != SCR_REPLY && s_screen != SCR_VOICE) {
+        if (s_screen != SCR_REPLY && s_screen != SCR_VOICE && s_screen != SCR_LISTEN) {
             const reply_mode_t mode = s_screen == SCR_QUESTION ? REPLY_ANSWER : s_screen == SCR_PLAN ? REPLY_PLAN : REPLY_SAY;
             if (mode == REPLY_SAY && !s->reply) {
                 break;
@@ -2202,7 +2510,7 @@ void ct_ui_on_key(ct_key_t key, bool down) {
         } else if (s_reply_mode == REPLY_SAY && !s->reply) {
             break;
         }
-        show_voice();
+        voice_begin(false);
         break;
     }
     default:
@@ -2223,11 +2531,12 @@ void ct_ui_show_off(bool battery_empty) {
     lv_image_set_src(fade, &ct_art_fade);
     lv_obj_align(fade, LV_ALIGN_BOTTOM_LEFT, 0, 0);
 
-    /* Centred on the lines the art leaves free for them (y 440 and 478). */
-    lv_obj_t *title = ct_label(screen, B24, battery_empty ? "电量用完了，已关机" : "已关机");
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 440 - lv_font_get_line_height(B24) / 2);
-    lv_obj_t *hint = ct_label(screen, F20, battery_empty ? "插上充电线再开机" : "按电源键开机");
-    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 478 - lv_font_get_line_height(F20) / 2);
+    /* Centred on the lines the art leaves free for them (y 438 and 490). B32 has only
+     * ASCII and the characters tools/fontpack/fonts.json lists for it. */
+    lv_obj_t *title = ct_label(screen, B32, battery_empty ? "电量用完了，已关机" : "已关机");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 438 - lv_font_get_line_height(B32) / 2);
+    lv_obj_t *hint = ct_label(screen, B24, battery_empty ? "插上充电线再开机" : "按电源键开机");
+    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 490 - lv_font_get_line_height(B24) / 2);
 
     /* White on the black band at the bottom: what the battery had, and when. */
     char clock[8], line[48];
@@ -2243,9 +2552,9 @@ void ct_ui_show_off(bool battery_empty) {
     } else {
         snprintf(line, sizeof(line), "codetalky");
     }
-    lv_obj_t *info = ct_label(screen, M20, line);
+    lv_obj_t *info = ct_label(screen, MB32, line);
     ct_invert(info); /* over the art's black: the same black, tinted for white text */
-    lv_obj_align(info, LV_ALIGN_BOTTOM_MID, 0, -(CT_ART_FADE_SOLID - lv_font_get_line_height(M20)) / 2);
+    lv_obj_align(info, LV_ALIGN_BOTTOM_MID, 0, -(CT_ART_FADE_SOLID - lv_font_get_line_height(MB32)) / 2);
 
     ct_hal_refresh_hint(CT_REFRESH_FULL);
     lv_screen_load(screen);

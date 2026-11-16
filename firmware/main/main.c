@@ -3,7 +3,11 @@
  * ct_ui_* calls. Touch/keys, the network and the panel refresh run in their own
  * tasks and talk to it through app_post().
  */
+#include <stdlib.h>
+#include <string.h>
+
 #include "app.h"
+#include "audio.h"
 #include "board.h"
 #include "charger.h"
 #include "ct_ui.h"
@@ -58,6 +62,18 @@ static void power_off(bool battery_empty) {
     board_power_off();
 }
 
+/* Microphone chunks, from the capture task to the UI task. */
+static void on_audio(const int16_t *pcm, size_t samples) {
+    const size_t bytes = samples * sizeof(int16_t);
+    char *copy = malloc(bytes);
+    if (copy == NULL) {
+        return;
+    }
+    memcpy(copy, pcm, bytes);
+    const app_event_t ev = {.type = APP_EV_AUDIO, .text = copy, .len = bytes};
+    app_post(&ev);
+}
+
 static void handle(app_event_t *ev) {
     switch (ev->type) {
     case APP_EV_KEY:
@@ -79,6 +95,10 @@ static void handle(app_event_t *ev) {
     case APP_EV_UPDATE:
         ota_run();
         break;
+    case APP_EV_AUDIO:
+        ct_ui_on_audio((const int16_t *)ev->text, ev->len / sizeof(int16_t));
+        free(ev->text);
+        break;
     }
 }
 
@@ -90,6 +110,7 @@ static void ui_task(void *arg) {
     input_init();
     ct_ui_init();
     net_init();
+    audio_init(on_audio);
     ESP_LOGI(TAG, "UI up, firmware %s; free internal %u KB, PSRAM %u KB", ota_version(),
              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));

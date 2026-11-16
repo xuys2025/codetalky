@@ -54,6 +54,12 @@ const char *ct_hal_firmware_version(void);
  * false if the platform can't or is already updating. */
 bool ct_hal_firmware_update(int link, const char *path, uint32_t size, const char *sha256, const char *version);
 
+/* Microphone: start capturing (16 kHz mono 16-bit samples then arrive through
+ * ct_ui_on_audio, on the UI thread) or stop. Start returns false if this platform
+ * has no microphone. */
+bool ct_hal_mic_start(void);
+void ct_hal_mic_stop(void);
+
 /* 32 random bits. Pairing and connection keys are made from these: they must come
  * from a cryptographic source (esp_random with the radio on; crypto.getRandomValues). */
 uint32_t ct_hal_random(void);

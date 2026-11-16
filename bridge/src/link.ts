@@ -8,6 +8,7 @@ import type { FirmwareImage, FirmwareStore } from './firmware.ts';
 import type { Pairing } from './pairing.ts';
 import { LIMITS, PROTO, parseFromDevice, type SessionSnapshot, type ToDevice } from './protocol.ts';
 import { Channel, commitOf, fromHex, linkKeys, newKeyPair, pairCode, pairKey, proofOf, random, same, sharedSecret, type KeyPair } from './secure.ts';
+import { level, VOICE_RATE, type Recognition, type Recognizer } from './voice.ts';
 
 /** A network device must have proven itself or paired within this long (a pairing window is 5 minutes). */
 export const HANDSHAKE_MS = 6 * 60 * 1000;
@@ -46,7 +47,23 @@ export interface LinkOptions {
   connected?: Map<string, DeviceLink>;
   /** Firmware offered with `codetalky firmware`; told to devices that can update. */
   firmware?: FirmwareStore;
+  /** Turns the device's recordings into words. Without it, recordings are ignored. */
+  voice?: Recognizer;
+  /** Each finished recording's samples (the bridge keeps the last one as a WAV file). */
+  recorded?: (pcm: Buffer) => void;
   log?: (line: string) => void;
+}
+
+/** A recording arriving from the device. */
+interface Recording {
+  n: number;
+  /** The next part expected. */
+  next: number;
+  chunks: Buffer[];
+  bytes: number;
+  rec: Recognition;
+  /** Parts went missing or it ran too long: answer 'lost' at the end. */
+  broken: boolean;
 }
 
 export const DEFAULT_QUICK = ['继续下一步', '跑一下测试', '提交这些改动', '先停一下，等我回电脑', '撤销刚才的修改'];
@@ -80,6 +97,8 @@ export class DeviceLink {
   private channel: Channel | null = null;
   /** Paired on this computer; waiting for the user to confirm it on the device too. */
   private confirming = false;
+  /** The device's recording in progress. */
+  private recording: Recording | null = null;
 
   private readonly hub: Hub;
   private readonly clock: Clock;
@@ -153,6 +172,13 @@ export class DeviceLink {
       return true;
     }
     if (!this.authed) return true; // actions only count once it has proven who it is
+    if (msg.t === 'voice' || msg.t === 'voice_end') {
+      // A network device's voice only counts encrypted, like everything after auth.
+      if (this.options.pairing && this.channel === null) return true;
+      if (msg.t === 'voice') this.voicePart(msg.n, msg.part, msg.pcm);
+      else this.voiceEnd(msg.n, msg.parts, msg.cancel);
+      return true;
+    }
     const err = this.hub.act(msg);
     // State first, then the ack: when the ack arrives the device already shows the truth.
     this.flush();
@@ -160,10 +186,66 @@ export class DeviceLink {
     return true;
   }
 
+  private voicePart(n: number, part: number, pcm: Buffer): void {
+    const recognizer = this.options.voice;
+    if (!recognizer) return;
+    if (part === 0) {
+      this.recording?.rec.cancel(); // a new recording replaces one never finished
+      this.recording = { n, next: 0, chunks: [], bytes: 0, rec: recognizer.start(), broken: false };
+    }
+    const r = this.recording;
+    if (!r || r.n !== n || r.broken) return;
+    if (part !== r.next || r.bytes + pcm.length > LIMITS.voiceSeconds * VOICE_RATE * 2) {
+      r.broken = true;
+      r.rec.cancel();
+      return;
+    }
+    r.next++;
+    r.bytes += pcm.length;
+    r.chunks.push(pcm);
+    r.rec.push(pcm);
+  }
+
+  private voiceEnd(n: number, parts: number, cancel: boolean): void {
+    const r = this.recording?.n === n ? this.recording : null;
+    this.recording = null;
+    if (!this.options.voice) return;
+    if (cancel) {
+      r?.rec.cancel();
+      return;
+    }
+    if (!r || r.broken || r.next !== parts) {
+      r?.rec.cancel();
+      this.options.log?.(`voice from "${this.device}": recording ${n} arrived incomplete`);
+      this.send({ t: 'heard', n, err: 'lost' });
+      return;
+    }
+    const pcm = Buffer.concat(r.chunks);
+    const { rms, peak } = level(pcm);
+    const seconds = (pcm.length / 2 / VOICE_RATE).toFixed(1);
+    this.options.recorded?.(pcm);
+    const started = this.clock.now();
+    r.rec.finish().then(
+      (words) => {
+        const text = this.fix(words.trim()).slice(0, LIMITS.heardText);
+        this.options.log?.(
+          `voice from "${this.device}": ${seconds} s (level ${rms}, peak ${peak}), ${this.options.voice!.name} in ${this.clock.now() - started} ms: ${text || '(nothing said)'}`,
+        );
+        if (!this.closed) this.send(text ? { t: 'heard', n, text } : { t: 'heard', n, err: 'empty' });
+      },
+      (err: unknown) => {
+        this.options.log?.(`voice from "${this.device}": ${seconds} s, recognition failed: ${(err as Error).message}`);
+        if (!this.closed) this.send({ t: 'heard', n, err: 'failed' });
+      },
+    );
+  }
+
   close(): void {
     if (this.deviceId !== null && this.options.connected?.get(this.deviceId) === this) {
       this.options.connected.delete(this.deviceId);
     }
+    this.recording?.rec.cancel();
+    this.recording = null;
     this.closed = true;
     this.cancelHandshake?.();
     this.cancelPair?.();

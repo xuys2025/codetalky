@@ -1,0 +1,38 @@
+--- a/src/misc/lv_text.c	2026-11-16 23:11:40.176389507 +0800
++++ b/src/misc/lv_text.c	2026-11-16 23:11:40.205001207 +0800
+@@ -190,6 +190,25 @@
+     return ret;
+ }
+ 
++/* CodeTalky (third_party/lvgl-patches): Chinese line breaking. A line may end after
++ * any Chinese character, but closing punctuation never starts a line and an opening
++ * bracket never ends one: they stay with the character next to them. */
++static bool ct_no_break_between(uint32_t letter, uint32_t next)
++{
++    static const uint32_t no_start[] = {
++        0xFF0C, 0x3002, 0x3001, 0xFF1B, 0xFF1A, 0xFF1F, 0xFF01, 0xFF09, 0x300D, 0x300F, /* ，。、；：？！）」』 */
++        0x3011, 0x300B, 0x3009, 0x3015, 0xFF3D, 0xFF5D, 0xFF05, 0x2026, 0x2014, 0x2019, /* 】》〉〕］｝％…—’ */
++        0x201D, 0x00B7, ',', '.', ';', ':', '?', '!', ')', ']', '}', '%', 0              /* ”· */
++    };
++    static const uint32_t no_end[] = {
++        0xFF08, 0x300C, 0x300E, 0x3010, 0x300A, 0x3008, 0x3014, 0xFF3B, 0xFF5B, 0x2018, /* （「『【《〈〔［｛‘ */
++        0x201C, '(', '[', '{', 0                                                        /* “ */
++    };
++    for(const uint32_t * c = no_start; *c != 0; c++) if(next == *c) return true;
++    for(const uint32_t * c = no_end; *c != 0; c++) if(letter == *c) return true;
++    return false;
++}
++
+ /**
+  * Get the next word of text. A word is delimited by break characters.
+  *
+@@ -283,7 +302,8 @@
+             word_len--;
+             break;
+         }
+-        else if(lv_text_is_a_word(letter_next) || lv_text_is_a_word(letter)) {
++        else if((lv_text_is_a_word(letter_next) || lv_text_is_a_word(letter)) &&
++                !ct_no_break_between(letter, letter_next)) {
+             /*Found a word for single letter, usually true for CJK*/
+             *word_w_ptr = cur_w;
+             i = i_next;

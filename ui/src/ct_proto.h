@@ -33,6 +33,7 @@ typedef enum {
     CT_EV_ACK,       /* answer to one of our actions */
     CT_EV_BAD_PROTO, /* the bridge speaks another protocol version */
     CT_EV_PAIRING,   /* this computer's pairing stage changed: show it (ct_proto_pair_stage) */
+    CT_EV_HEARD,     /* what the computer heard in a recording (seq: its number; ct_proto_heard_*) */
 } ct_event_type_t;
 
 typedef struct {
@@ -84,7 +85,23 @@ uint32_t ct_proto_answer(int link, const char *id, const char *req, int option);
 uint32_t ct_proto_answer_many(int link, const char *id, const char *req, const int *options, int count);
 /* A question answered in the user's own words. */
 uint32_t ct_proto_answer_text(int link, const char *id, const char *req, const char *text);
-uint32_t ct_proto_reply(int link, const char *id, const char *text);
+/* A new instruction. While the agent works: NOW it takes the words after its current
+ * step (the user steering it); STOP interrupts it first (text may then be empty: just
+ * stop). When it is idle both simply start a turn. */
+typedef enum { CT_REPLY_NOW = 0, CT_REPLY_STOP } ct_reply_how_t;
+uint32_t ct_proto_reply(int link, const char *id, const char *text, ct_reply_how_t how);
 uint32_t ct_proto_seen(int link, const char *id);
+
+/* Speech. While the user holds the talk key, recording n goes in parts (16 kHz mono
+ * 16-bit samples, numbered from 0) to the computer of the session it is for, then an
+ * end: the computer answers with what it heard (CT_EV_HEARD). cancel: drop it, no
+ * answer comes. False if the link is down. */
+bool ct_proto_voice(int link, const char *id, uint32_t n, uint32_t part, const int16_t *pcm, size_t samples);
+bool ct_proto_voice_end(int link, const char *id, uint32_t n, uint32_t parts, bool cancel);
+/* After CT_EV_HEARD: the words, or NULL and why not (ct_proto_heard_err: "empty",
+ * nothing was said; "lost", the recording arrived incomplete; else it failed). */
+#define CT_HEARD_MAX 600
+const char *ct_proto_heard_text(void);
+const char *ct_proto_heard_err(void);
 
 #endif /* CT_PROTO_H */

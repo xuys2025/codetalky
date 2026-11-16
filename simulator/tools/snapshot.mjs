@@ -22,6 +22,9 @@
 //   --relink N   computer N drops and reconnects (a paired device proves itself)
 //   --unpair N   computer N forgets the device (it says so when the device next connects)
 //   --long-report  make the api-server report too long for one screen
+//   --ask FILE   instead of the demo sessions, one Claude Code session (bincov) asking
+//                the question in FILE: an AskUserQuestion input as Claude wrote it,
+//                taken through the bridge's own hook handling (must come first)
 //   --verbose    print the frames sent by the device
 //
 // Actions run in the order given; 300 ms pass after each one.
@@ -37,6 +40,8 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { readFileSync } from 'node:fs';
+import { ClaudeSource } from '../../bridge/src/claude/source.ts';
 import { Glyphs } from '../../bridge/src/glyphs.ts';
 import { Pairing } from '../../bridge/src/pairing.ts';
 import { DEFAULT_QUICK, DeviceLink } from '../../bridge/src/link.ts';
@@ -53,8 +58,17 @@ const offline = args.includes('--offline');
 const verbose = args.includes('--verbose');
 const hostsAt = args.indexOf('--hosts');
 const twoHosts = hostsAt >= 0 && args[hostsAt + 1] === '2';
+const askAt = args.indexOf('--ask');
+const askInput = askAt >= 0 ? JSON.parse(readFileSync(args[askAt + 1], 'utf8')) : null;
 const actions = args.filter(
-  (a, i) => a !== '--offline' && a !== '--verbose' && a !== '--long-report' && a !== '--pair' && a !== '--pair-wait' && !(hostsAt >= 0 && (i === hostsAt || i === hostsAt + 1)),
+  (a, i) =>
+    a !== '--offline' &&
+    a !== '--verbose' &&
+    a !== '--long-report' &&
+    a !== '--pair' &&
+    a !== '--pair-wait' &&
+    !(hostsAt >= 0 && (i === hostsAt || i === hostsAt + 1)) &&
+    !(askAt >= 0 && (i === askAt || i === askAt + 1)),
 );
 
 // ---- bridges, in process: one per computer ----
@@ -83,7 +97,7 @@ const random = () => {
 const entropy = (n) => Buffer.from(Array.from({ length: n }, () => random() & 0xff));
 const bridges = COMPUTERS.map((computer, index) => {
   const hub = new Hub(clock);
-  for (const script of demoScripts()) {
+  for (const script of askInput ? [] : demoScripts()) {
     if (longReport && script.initial(0).id === 'api-server') {
       // A report too long for one screen, to check paging.
       const report = script.steps[0].report;
@@ -173,6 +187,13 @@ if (!offline) {
   }
 }
 run(1000);
+if (askInput) {
+  const claude = new ClaudeSource(bridges[0].hub, clock, { holdSeconds: 3600, log: () => {} });
+  const hook = { session_id: '8fad1027-b091-48f1-a846-c3daf701ae9c', cwd: 'D:\\bincov' };
+  void claude.handle({ ...hook, hook_event_name: 'UserPromptSubmit', prompt: '继续' });
+  void claude.handle({ ...hook, hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion', tool_input: askInput });
+  run(1000);
+}
 
 const point = (value) => value.split(',').map(Number);
 for (let i = 0; i < actions.length; i += 2) {

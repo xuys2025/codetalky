@@ -11,7 +11,8 @@ glyph; the two middle levels only smooth curves and diagonals.
 
 Output: one LVGL "fmt_txt" C file per font plus ct_fonts.h, written to the out_dir named
 in the config. All fonts of one pixel size share the same line height and baseline, so
-runs in different fonts line up.
+runs in different fonts line up. A font with "chars" is a display size for one line:
+it holds only ASCII and those characters (no scan, no GB2312), so it costs a few KB.
 """
 import json
 import sys
@@ -29,13 +30,16 @@ PUNCT = (
 )
 
 
-def gb2312_level1():
+def gb2312_hanzi():
+    """Both levels of GB2312's hanzi (6,763): level 2 has words agents use every day
+    (渲染, 阈值, 熵) that level 1 lacks."""
     out = []
-    for hi in range(0xB0, 0xD8):
+    for hi in range(0xB0, 0xF8):
         for lo in range(0xA1, 0xFF):
-            if hi == 0xD7 and lo > 0xF9:
-                continue
-            out.append(bytes([hi, lo]).decode("gb2312"))
+            try:
+                out.append(bytes([hi, lo]).decode("gb2312"))
+            except UnicodeDecodeError:
+                pass  # the unassigned end of a row
     return out
 
 
@@ -48,12 +52,16 @@ def scan_sources(root, dirs):
     return found
 
 
-def build_charset(cfg, root, cjk):
+def build_charset(cfg, root, spec):
     chars = {chr(c) for c in range(0x20, 0x7F)}
+    if "chars" in spec:  # a display size for one line: ASCII and just these
+        chars.update(spec["chars"])
+        return sorted(chars)
+    cjk = spec.get("cjk", False)
     chars.update(PUNCT)
     chars.update(cfg.get("extra", ""))
     if cjk:
-        chars.update(gb2312_level1())
+        chars.update(gb2312_hanzi())
         chars.update(scan_sources(root, cfg.get("scan", [])))
     else:
         chars.update(ch for ch in scan_sources(root, cfg.get("scan", [])) if ord(ch) < 0x2E80)
@@ -183,7 +191,7 @@ def main():
     rendered = []
     for spec in cfg["fonts"]:
         spec = dict(spec, path=str((root / spec["path"]).resolve()))
-        chars = build_charset(cfg, root, spec.get("cjk", False))
+        chars = build_charset(cfg, root, spec)
         glyphs, missing = render_font(spec, chars)
         rendered.append((spec, glyphs, missing))
 

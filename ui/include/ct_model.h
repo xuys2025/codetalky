@@ -91,13 +91,15 @@ typedef struct {
     /* question */
     const char *text, *note;
     const ct_option_t *options;
-    int option_count;
+    int option_count; /* at most CT_ASK_OPTIONS */
     bool multi; /* several options may be picked */
 
     /* plan */
     const ct_para_t *plan;
     int plan_count;
 } ct_ask_t;
+
+#define CT_ASK_OPTIONS 6 /* options in one question, at most */
 
 typedef struct {
     char id[CT_ID_MAX];

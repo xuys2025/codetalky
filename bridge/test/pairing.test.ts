@@ -6,6 +6,7 @@ import { test } from 'node:test';
 
 import { ManualClock } from '../src/clock.ts';
 import { FirmwareStore, type FirmwareImage } from '../src/firmware.ts';
+import type { Recognizer } from '../src/voice.ts';
 import { Hub } from '../src/hub.ts';
 import { DeviceLink, HANDSHAKE_MS } from '../src/link.ts';
 import { MAX_PENDING, Pairing, WINDOW_MS, WINDOW_REVEALS } from '../src/pairing.ts';
@@ -154,7 +155,7 @@ class FakeDevice {
     pairing: Pairing,
     key: Buffer | null = null,
     id = DEVICE,
-    more: { fw?: string; firmware?: FirmwareStore; connected?: Map<string, DeviceLink> } = {},
+    more: { fw?: string; firmware?: FirmwareStore; connected?: Map<string, DeviceLink>; voice?: Recognizer; recorded?: (pcm: Buffer) => void } = {},
   ) {
     this.key = key;
     this.id = id;
@@ -169,6 +170,8 @@ class FakeDevice {
       drop: () => (this.dropped = true),
       firmware: more.firmware,
       connected: more.connected,
+      voice: more.voice,
+      recorded: more.recorded,
     });
   }
 
@@ -513,4 +516,50 @@ test('a device that connects again and proves itself replaces its old, likely de
   stranger.hello();
   assert.equal(again.dropped, false);
   assert.equal(connected.get(DEVICE), again.link);
+});
+
+test('the device talks: its recording is recognised and the words come back over the encrypted link', async () => {
+  const { clock, pairing } = setup();
+  const hub = new Hub(clock);
+  pairing.open();
+  const recognizer: Recognizer = {
+    name: 'test',
+    start: () => {
+      const parts: Buffer[] = [];
+      return { push: (p) => parts.push(p), finish: () => Promise.resolve(parts.length === 2 ? ' 跑一下测试 ' : ''), cancel: () => {} };
+    },
+  };
+  const kept: Buffer[] = [];
+  const d = new FakeDevice(hub, clock, pairing, null, DEVICE, { voice: recognizer, recorded: (pcm) => kept.push(pcm) });
+  d.hello();
+  pairing.approve(d.code);
+  const pcm = Buffer.alloc(1600, 1).toString('base64');
+  const settle = () => new Promise((done) => setImmediate(done));
+
+  d.send({ t: 'voice', id: 's1', n: 1, part: 0, pcm });
+  d.send({ t: 'voice', id: 's1', n: 1, part: 1, pcm });
+  d.send({ t: 'voice_end', id: 's1', n: 1, parts: 2 });
+  await settle();
+  assert.deepEqual(d.got.at(-1), { t: 'heard', n: 1, text: '跑一下测试' });
+  assert.equal(kept[0]?.length, 3200, 'the whole recording is kept');
+
+  // Nothing said.
+  d.send({ t: 'voice', id: 's1', n: 2, part: 0, pcm });
+  d.send({ t: 'voice_end', id: 's1', n: 2, parts: 1 });
+  await settle();
+  assert.deepEqual(d.got.at(-1), { t: 'heard', n: 2, err: 'empty' });
+
+  // A part went missing on the way.
+  d.send({ t: 'voice', id: 's1', n: 3, part: 0, pcm });
+  d.send({ t: 'voice', id: 's1', n: 3, part: 2, pcm });
+  d.send({ t: 'voice_end', id: 's1', n: 3, parts: 3 });
+  await settle();
+  assert.deepEqual(d.got.at(-1), { t: 'heard', n: 3, err: 'lost' });
+
+  // Let go of without sending: no answer at all.
+  const before = d.got.length;
+  d.send({ t: 'voice', id: 's1', n: 4, part: 0, pcm });
+  d.send({ t: 'voice_end', id: 's1', n: 4, parts: 1, cancel: true });
+  await settle();
+  assert.equal(d.got.length, before);
 });

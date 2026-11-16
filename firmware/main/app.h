@@ -14,6 +14,7 @@ typedef enum {
     APP_EV_MSG,  /* a = link, text/len = one frame (malloc'd; the UI task frees it) */
     APP_EV_POWER_OFF, /* a = 0 the user held the power key, 1 the battery is empty */
     APP_EV_UPDATE,    /* new firmware was offered: ota_run() */
+    APP_EV_AUDIO,     /* text/len = microphone samples, 16-bit (malloc'd; the UI task frees it) */
 } app_ev_type_t;
 
 typedef struct {

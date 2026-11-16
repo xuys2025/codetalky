@@ -189,11 +189,15 @@ def main():
         d = ImageDraw.Draw(screen)
         fonts = ROOT / "third_party" / "fonts"
         b24 = ImageFont.truetype(str(fonts / "sarasa-ui-sc" / "SarasaUiSC-SemiBold.ttf"), 24)
-        f20 = ImageFont.truetype(str(fonts / "sarasa-ui-sc" / "SarasaUiSC-Regular.ttf"), 20)
-        m20 = ImageFont.truetype(str(fonts / "sarasa-ui-sc" / "SarasaUiSC-Regular.ttf"), 20)
-        d.text((W // 2, 440), "已关机", font=b24, fill=0, anchor="mm")
-        d.text((W // 2, 478), "按电源键开机", font=f20, fill=0, anchor="mm")
-        d.text((W // 2, H - FADE_SOLID // 2), "电量 82% · 19:53 关机", font=m20, fill=255, anchor="mm")
+        mb32 = ImageFont.truetype(str(fonts / "jetbrains-mono" / "JetBrainsMono-ExtraBold.ttf"), 32)
+        d.text((W // 2, 438), "已关机", font=b24.font_variant(size=32), fill=0, anchor="mm")
+        d.text((W // 2, 490), "按电源键开机", font=b24, fill=0, anchor="mm")
+        b32 = b24.font_variant(size=32)
+        parts = [("电量 ", b32), ("82%", mb32), (" · ", b32), ("19:53", mb32), (" 关机", b32)]
+        x = (W - sum(d.textlength(t, font=f) for t, f in parts)) / 2
+        for t, f in parts:  # the device's font falls back to the CJK one the same way
+            d.text((x, H - FADE_SOLID // 2), t, font=f, fill=255, anchor="lm")
+            x += d.textlength(t, font=f)
         screen.save(sys.argv[1])
         print(f"preview: {sys.argv[1]}")
 

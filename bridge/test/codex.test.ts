@@ -261,6 +261,39 @@ test('a managed Codex run: on the device before its first prompt, and its termin
   await send('UserPromptSubmit', { prompt: '再提交' });
   await send('Stop', { last_assistant_message: '提交了' });
 
+  // Steering: said "now" while it works, an instruction is typed at once (the agent
+  // takes it after its current step), logged as an interjection, and not again when
+  // the agent reports it.
+  await send('UserPromptSubmit', { prompt: '写个脚本' });
+  assert.equal(hub.act({ t: 'reply', seq: 7, id: ID, text: '改用 TypeScript', how: 'now' }), null);
+  assert.deepEqual(sent.at(-1), { t: 'type', text: '改用 TypeScript' });
+  assert.deepEqual([hub.get(ID)!.log[0]!.verb, hub.get(ID)!.log[0]!.target], ['插话', '改用 TypeScript']);
+  await send('UserPromptSubmit', { prompt: '改用 TypeScript' });
+  assert.equal(hub.get(ID)!.log.filter((e) => e.target === '改用 TypeScript').length, 1);
+
+  // While it waits for an approval, an interjection waits too (its Enter would answer
+  // the prompt); an interruption goes first: Esc, which also dismisses the prompt.
+  promptUp = true;
+  await ask('echo five >> note.txt');
+  const n = typed();
+  hub.act({ t: 'reply', seq: 8, id: ID, text: '顺便看下日志', how: 'now' });
+  assert.equal(typed(), n);
+  assert.equal(hub.act({ t: 'reply', seq: 9, id: ID, text: '', how: 'stop' }), null);
+  // Stopped, the request it held is gone, and the waiting interjection goes after the Esc.
+  assert.deepEqual(sent.slice(-2), [
+    { t: 'type', text: '', stop: true },
+    { t: 'type', text: '顺便看下日志' },
+  ]);
+  assert.equal(hub.get(ID)!.ask, undefined);
+  assert.deepEqual(
+    hub.get(ID)!.log.slice(0, 2).map((e) => e.verb),
+    ['插话', '打断'],
+  );
+  // An empty instruction is fine only as "just stop".
+  assert.equal(hub.act({ t: 'reply', seq: 10, id: ID, text: ' ', how: 'now' }), 'bad');
+  await send('UserPromptSubmit', { prompt: '顺便看下日志' });
+  await send('Stop', { last_assistant_message: '日志没问题' });
+
   // Codex exits: its session ends, then the terminal closes. The report stays until seen.
   await send('SessionEnd');
   assert.equal(hub.get(ID)!.state, 'done');

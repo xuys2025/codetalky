@@ -125,7 +125,14 @@ export type ToDevice =
    * path, check it is size bytes with this SHA-256, install it and restart. Sent only
    * to devices whose hello carries fw.
    */
-  | { t: 'update'; path: string; size: number; sha256: string; version: string };
+  | { t: 'update'; path: string; size: number; sha256: string; version: string }
+  /** What was said in recording n (see voice): the words, or why there are none
+   * ('empty': nothing said; 'lost': parts missing; 'failed': recognition failed). */
+  | { t: 'heard'; n: number; text?: string; err?: 'empty' | 'lost' | 'failed' };
+
+/** When an instruction reaches an agent that is working: 'now' it takes it after its
+ * current step (the user steering it), 'stop' it is interrupted first. */
+export type ReplyHow = 'now' | 'stop';
 
 /** An answer to a question: one option, several (multi), or the user's own words. */
 export type Choice = { option: number } | { options: number[] } | { text: string };
@@ -134,7 +141,8 @@ export type DeviceAction =
   /** text: for a plan sent back, what to change. */
   | { t: 'approve'; seq: number; id: string; req: string; allow: boolean; text?: string }
   | ({ t: 'answer'; seq: number; id: string; req: string } & Choice)
-  | { t: 'reply'; seq: number; id: string; text: string }
+  /** how: see ReplyHow; unset (older devices): wait for the turn to end. */
+  | { t: 'reply'; seq: number; id: string; text: string; how?: ReplyHow }
   | { t: 'seen'; seq: number; id: string };
 
 export type FromDevice =
@@ -146,6 +154,10 @@ export type FromDevice =
   | { t: 'pair'; pub: string; r: string }
   /** The user confirmed on the device too that the computer said it paired (sent encrypted). */
   | { t: 'paired' }
+  /** Speech while the talk key is held: part `part` of recording n, 16 kHz mono 16-bit little-endian samples. */
+  | { t: 'voice'; id: string; n: number; part: number; pcm: Buffer }
+  /** Recording n is over after `parts` parts: recognise it, or drop it (cancel). */
+  | { t: 'voice_end'; id: string; n: number; parts: number; cancel: boolean }
   | DeviceAction;
 
 /** Limits the bridge applies before sending, so the device can size its buffers. */
@@ -155,6 +167,12 @@ export const LIMITS = {
   hunks: 6,
   hunkLines: 14,
   replyText: 2000,
+  /** Bytes of samples in one voice part (the device sends 1600: 50 ms). */
+  voicePart: 8000,
+  /** Seconds in one recording. */
+  voiceSeconds: 60,
+  /** Characters of recognised text sent back. */
+  heardText: 300,
 } as const;
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -184,6 +202,17 @@ export function parseFromDevice(text: string): FromDevice | null {
     return hex(msg.pub, 32) && hex(msg.r, 16) ? { t: 'pair', pub: msg.pub, r: msg.r } : null;
   }
   if (msg.t === 'paired') return { t: 'paired' };
+  if (msg.t === 'voice' || msg.t === 'voice_end') {
+    if (!isId(msg.id) || !isSeq(msg.n)) return null;
+    if (msg.t === 'voice_end') {
+      if (!isSeq(msg.parts)) return null;
+      return { t: 'voice_end', id: msg.id, n: msg.n, parts: msg.parts, cancel: msg.cancel === true };
+    }
+    if (!isSeq(msg.part) || typeof msg.pcm !== 'string' || msg.pcm.length > LIMITS.voicePart * 2) return null;
+    const pcm = Buffer.from(msg.pcm, 'base64');
+    if (pcm.length === 0 || pcm.length > LIMITS.voicePart || pcm.length % 2 !== 0) return null;
+    return { t: 'voice', id: msg.id, n: msg.n, part: msg.part, pcm };
+  }
   if (!isSeq(msg.seq) || !isId(msg.id)) return null;
   const base = { seq: msg.seq, id: msg.id };
   switch (msg.t) {
@@ -202,9 +231,11 @@ export function parseFromDevice(text: string): FromDevice | null {
       if (typeof msg.text === 'string') return { t: 'answer', ...base, req: msg.req, text: msg.text };
       return null;
     }
-    case 'reply':
+    case 'reply': {
       if (typeof msg.text !== 'string') return null;
-      return { t: 'reply', ...base, text: msg.text };
+      const how = msg.how === 'now' || msg.how === 'stop' ? msg.how : undefined;
+      return { t: 'reply', ...base, text: msg.text, ...(how ? { how } : {}) };
+    }
     case 'seen':
       return { t: 'seen', ...base };
     default:

@@ -199,6 +199,11 @@ export function resultOf(tool: string, input: Input, response: unknown, cwd: str
     case 'WebFetch':
       if (num(r.code) !== undefined) out.res = String(r.code);
       break;
+    case 'Agent':
+    case 'Task':
+      // A background subagent's call returns at once; it reports back later.
+      out.res = r.status === 'async_launched' ? '后台' : '完成';
+      break;
     default:
       break;
   }

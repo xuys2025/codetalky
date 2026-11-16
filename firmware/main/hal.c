@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "audio.h"
 #include "board.h"
 #include "ct_hal.h"
 #include "epd.h"
@@ -42,6 +43,14 @@ const char *ct_hal_firmware_version(void) {
 
 bool ct_hal_firmware_update(int link, const char *path, uint32_t size, const char *sha256, const char *version) {
     return ota_request(link, path, size, sha256, version);
+}
+
+bool ct_hal_mic_start(void) {
+    return audio_start();
+}
+
+void ct_hal_mic_stop(void) {
+    audio_stop();
 }
 
 uint32_t ct_hal_random(void) {

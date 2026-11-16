@@ -23,6 +23,8 @@
 #define M20 (&ct_font_mono_20)
 #define MB20 (&ct_font_monob_20)
 #define MB24 (&ct_font_monob_24)
+#define B32 (&ct_font_bold_32)   /* B32, MB32: only ASCII and the characters fonts.json lists */
+#define MB32 (&ct_font_monob_32)
 
 void ct_widgets_init(void);
 

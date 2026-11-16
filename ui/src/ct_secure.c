@@ -121,10 +121,31 @@ static void nonce_of(uint8_t nonce[12], uint64_t counter) {
     memset(nonce + 8, 0, 4);
 }
 
+size_t ct_b64(char *out, const uint8_t *in, size_t n) {
+    char *o = out;
+    size_t i = 0;
+    for (; i + 2 < n; i += 3) {
+        const uint32_t v = ((uint32_t)in[i] << 16) | ((uint32_t)in[i + 1] << 8) | in[i + 2];
+        *o++ = B64[(v >> 18) & 63];
+        *o++ = B64[(v >> 12) & 63];
+        *o++ = B64[(v >> 6) & 63];
+        *o++ = B64[v & 63];
+    }
+    if (i < n) {
+        const uint32_t v = ((uint32_t)in[i] << 16) | (i + 1 < n ? (uint32_t)in[i + 1] << 8 : 0);
+        *o++ = B64[(v >> 18) & 63];
+        *o++ = B64[(v >> 12) & 63];
+        *o++ = i + 1 < n ? B64[(v >> 6) & 63] : '=';
+        *o++ = '=';
+    }
+    *o = '\0';
+    return (size_t)(o - out);
+}
+
 char *ct_seal(const uint8_t key[CT_KEY_BYTES], uint64_t counter, const char *text, size_t len) {
     const size_t raw_len = 16 + len;
     uint8_t *raw = malloc(raw_len);
-    char *out = malloc(1 + (raw_len + 2) / 3 * 4 + 1);
+    char *out = malloc(1 + CT_B64_LEN(raw_len) + 1);
     if (raw == NULL || out == NULL) {
         free(raw);
         free(out);
@@ -137,24 +158,8 @@ char *ct_seal(const uint8_t key[CT_KEY_BYTES], uint64_t counter, const char *tex
     crypto_aead_write(&ctx, raw + 16, raw, NULL, 0, (const uint8_t *)text, len);
     crypto_wipe(&ctx, sizeof(ctx));
 
-    char *o = out;
-    *o++ = 'E';
-    size_t i = 0;
-    for (; i + 2 < raw_len; i += 3) {
-        const uint32_t v = ((uint32_t)raw[i] << 16) | ((uint32_t)raw[i + 1] << 8) | raw[i + 2];
-        *o++ = B64[(v >> 18) & 63];
-        *o++ = B64[(v >> 12) & 63];
-        *o++ = B64[(v >> 6) & 63];
-        *o++ = B64[v & 63];
-    }
-    if (i < raw_len) {
-        const uint32_t v = ((uint32_t)raw[i] << 16) | (i + 1 < raw_len ? (uint32_t)raw[i + 1] << 8 : 0);
-        *o++ = B64[(v >> 18) & 63];
-        *o++ = B64[(v >> 12) & 63];
-        *o++ = i + 1 < raw_len ? B64[(v >> 6) & 63] : '=';
-        *o++ = '=';
-    }
-    *o = '\0';
+    out[0] = 'E';
+    ct_b64(out + 1, raw, raw_len);
     free(raw);
     return out;
 }

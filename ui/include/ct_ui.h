@@ -7,6 +7,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -36,6 +37,9 @@ void ct_ui_on_link(int link, bool up);
 
 /* One text frame from a bridge. Call from the UI thread, not from inside LVGL. */
 void ct_ui_on_message(int link, const char *json, size_t len);
+
+/* Microphone samples (16 kHz mono 16-bit) while ct_hal_mic_start() is in effect. UI thread. */
+void ct_ui_on_audio(const int16_t *pcm, size_t samples);
 
 /* The last screen before the device switches off (e-ink keeps showing it): the
  * logo, how to switch on again, and the battery level and time. Loads it with a

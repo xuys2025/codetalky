@@ -105,6 +105,13 @@ bool ct_hal_firmware_update(int link, const char *path, uint32_t size, const cha
     return false;
 }
 
+/* No microphone yet: the voice screen shows its sample words. */
+bool ct_hal_mic_start(void) {
+    return false;
+}
+
+void ct_hal_mic_stop(void) {}
+
 int ct_hal_battery_percent(void) {
     return 82;
 }

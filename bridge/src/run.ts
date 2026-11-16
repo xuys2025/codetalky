@@ -25,6 +25,8 @@ const ENTER_DELAY_MS = 150;
  */
 export const PROMPT_UP = /No, and tell \w+ what to do differently|Yes, proceed|Press enter to confirm/i;
 const PROMPT_POLL_MS = 400;
+/** After Esc, before typing: the agent shows it stopped and its input box comes back. */
+const STOP_SETTLE_MS = 600;
 
 /** The first line of an agent's permission prompt ("Would you like to run the following command?"). */
 const PROMPT_HEAD = /Would you like to|Do you want to/i;
@@ -175,13 +177,18 @@ export function runManaged(o: RunOptions): Promise<number> {
     while (!done && PROMPT_UP.test(await screenText())) await new Promise((r) => setTimeout(r, PROMPT_POLL_MS));
     return !done;
   };
-  // Instructions are typed one after another, each once no prompt is up. The bridge only
-  // sends one while the agent isn't working, so a prompt shouldn't come up meanwhile;
-  // if one does before the Enter, that Enter would answer it: wait until it's gone.
+  // Instructions are typed one after another, each once no prompt is up: typed into a
+  // prompt, the instruction's Enter would answer it. Mid-turn (the user interjecting)
+  // the agent takes a typed line once it finishes its current step. stop: Esc first,
+  // which interrupts the agent (and dismisses a prompt that is up).
   let typing: Promise<void> = Promise.resolve();
-  const typeLine = (keys: string) => {
+  const typeLine = (keys: string, stop: boolean) => {
     typing = typing.then(async () => {
-      if (!(await promptGone())) return;
+      if (stop) {
+        term.write('\x1b');
+        await new Promise((r) => setTimeout(r, STOP_SETTLE_MS));
+      }
+      if (!keys || !(await promptGone())) return;
       term.write(keys);
       await new Promise((r) => setTimeout(r, ENTER_DELAY_MS));
       if (await promptGone()) term.write('\r');
@@ -212,7 +219,7 @@ export function runManaged(o: RunOptions): Promise<number> {
       }
       if (msg.t !== 'type' || typeof msg.text !== 'string') return;
       const keys = asKeys(msg.text);
-      if (keys) typeLine(keys);
+      if (keys || msg.stop === true) typeLine(keys, msg.stop === true);
     });
     ws.on('error', () => {});
     ws.on('close', () => {

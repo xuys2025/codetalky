@@ -29,7 +29,7 @@
 #define MAX_FILES 32
 #define MAX_HUNKS 6
 #define MAX_LINES 14
-#define MAX_OPTIONS 6
+#define MAX_OPTIONS CT_ASK_OPTIONS
 #define MAX_REPORT 24
 
 /* Longest strings kept, in bytes. */
@@ -65,6 +65,27 @@ static struct {
     sec_t sec;
 } s_links[CT_MAX_LINKS];
 static uint32_t s_seq = 1;
+
+/* The last "heard": the words, or why there are none. */
+static char s_heard[CT_HEARD_MAX];
+static bool s_heard_ok;
+
+/* Drop a UTF-8 sequence cut short at the end of s (by snprintf). */
+static void clip_utf8(char *s) {
+    size_t len = strlen(s);
+    size_t start = len;
+    while (start > 0 && ((unsigned char)s[start - 1] & 0xC0) == 0x80) {
+        start--;
+    }
+    if (start == 0) {
+        return;
+    }
+    const unsigned char lead = (unsigned char)s[start - 1];
+    const size_t need = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
+    if (len - (start - 1) < need) {
+        s[start - 1] = '\0';
+    }
+}
 
 /* ---------- identity and pairing ---------- */
 
@@ -620,6 +641,14 @@ static ct_event_t handle(int link, const char *json, size_t len, bool sealed) {
         ev.type = CT_EV_ACK;
         ev.seq = (uint32_t)number(msg, "seq", 0);
         ev.ack = cJSON_IsTrue(field(msg, "ok")) ? CT_ACK_OK : ack_of(raw_string(msg, "err"));
+    } else if (strcmp(t, "heard") == 0) {
+        const char *text = raw_string(msg, "text");
+        const char *err = raw_string(msg, "err");
+        s_heard_ok = text != NULL && text[0] != '\0';
+        snprintf(s_heard, sizeof(s_heard), "%s", s_heard_ok ? text : err != NULL ? err : "failed");
+        clip_utf8(s_heard);
+        ev.type = CT_EV_HEARD;
+        ev.seq = (uint32_t)number(msg, "n", 0);
     }
     cJSON_Delete(msg);
     return ev;
@@ -845,14 +874,55 @@ uint32_t ct_proto_answer_text(int link, const char *id, const char *req, const c
     return send_action(link, msg);
 }
 
-uint32_t ct_proto_reply(int link, const char *id, const char *text) {
+uint32_t ct_proto_reply(int link, const char *id, const char *text, ct_reply_how_t how) {
     cJSON *msg = action(link, "reply", id);
     if (msg != NULL) {
-        cJSON_AddStringToObject(msg, "text", text);
+        cJSON_AddStringToObject(msg, "text", text != NULL ? text : "");
+        cJSON_AddStringToObject(msg, "how", how == CT_REPLY_STOP ? "stop" : "now");
     }
     return send_action(link, msg);
 }
 
 uint32_t ct_proto_seen(int link, const char *id) {
     return send_action(link, action(link, "seen", id));
+}
+
+bool ct_proto_voice(int link, const char *id, uint32_t n, uint32_t part, const int16_t *pcm, size_t samples) {
+    cJSON *msg = action(link, "voice", id);
+    if (msg == NULL) {
+        return false;
+    }
+    const size_t bytes = samples * sizeof(int16_t);
+    char *b64 = malloc(CT_B64_LEN(bytes) + 1);
+    if (b64 == NULL) {
+        cJSON_Delete(msg);
+        return false;
+    }
+    ct_b64(b64, (const uint8_t *)pcm, bytes); /* little-endian on both platforms */
+    cJSON_AddNumberToObject(msg, "n", n);
+    cJSON_AddNumberToObject(msg, "part", part);
+    cJSON_AddStringToObject(msg, "pcm", b64);
+    free(b64);
+    return send_json(link, msg);
+}
+
+bool ct_proto_voice_end(int link, const char *id, uint32_t n, uint32_t parts, bool cancel) {
+    cJSON *msg = action(link, "voice_end", id);
+    if (msg == NULL) {
+        return false;
+    }
+    cJSON_AddNumberToObject(msg, "n", n);
+    cJSON_AddNumberToObject(msg, "parts", parts);
+    if (cancel) {
+        cJSON_AddBoolToObject(msg, "cancel", true);
+    }
+    return send_json(link, msg);
+}
+
+const char *ct_proto_heard_text(void) {
+    return s_heard_ok ? s_heard : NULL;
+}
+
+const char *ct_proto_heard_err(void) {
+    return s_heard_ok ? NULL : s_heard;
 }

@@ -38,6 +38,10 @@ char *ct_seal(const uint8_t key[CT_KEY_BYTES], uint64_t counter, const char *tex
  * it isn't genuine for this key and counter. */
 char *ct_open(const uint8_t key[CT_KEY_BYTES], uint64_t counter, const char *b64, size_t len, size_t *out_len);
 
+/* Base64 of n bytes into out (CT_B64_LEN(n) + 1 chars, terminated); returns the length. */
+#define CT_B64_LEN(n) (((n) + 2) / 3 * 4)
+size_t ct_b64(char *out, const uint8_t *in, size_t n);
+
 /* Lowercase hex of n bytes into out (2n + 1 chars). */
 void ct_hex(char *out, const uint8_t *bytes, size_t n);
 /* Exactly n bytes of hex; false otherwise. */

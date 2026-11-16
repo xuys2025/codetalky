@@ -34,6 +34,7 @@ if [ ! -f "$LVGL/lvgl.h" ]; then
   https_proxy="${CT_PROXY:-${https_proxy:-}}" \
     git clone --depth 1 -b "$LVGL_TAG" https://github.com/lvgl/lvgl.git "$LVGL"
 fi
+bash "$ROOT/third_party/lvgl-patches/apply.sh" "$LVGL"
 
 mkdir -p "$BUILD" "$OUT"
 

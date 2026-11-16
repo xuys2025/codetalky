@@ -28,3 +28,6 @@ build/
 # 固件编译产物（firmware/build.sh 输出）
 /firmware/out/
 /firmware/managed_components/
+
+# Python 缓存
+__pycache__/

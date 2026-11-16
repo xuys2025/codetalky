@@ -33,6 +33,9 @@ import { Runs } from './runs.ts';
 import { startServer, type PostReply } from './server.ts';
 import { startDiscovery } from './discovery.ts';
 import { FirmwareStore, readImage } from './firmware.ts';
+import { Placeholder, wav, type Recognizer } from './voice.ts';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { Doubao, DOUBAO_FILE, DOUBAO_RESOURCES, loadDoubao } from './doubao.ts';
 import { resolve as resolvePath } from 'node:path';
 
 const USAGE = `usage: node src/main.ts [--name N] [--fake] [--fake-only IDS] [--speed N] [--hold S]
@@ -63,6 +66,8 @@ const USAGE = `usage: node src/main.ts [--name N] [--fake] [--fake-only IDS] [--
   unpair ID       forget a paired device (by id or name)
   firmware [FILE] send new firmware to the connected devices over the network
                   (default: firmware/out/codetalky.bin, from firmware/build.sh)
+  voice-test [FILE]  recognise a 16 kHz mono WAV with Doubao (default: the device's
+                  last recording), to check ~/.codetalky/doubao.json
 
   hooks           print hook settings that send Claude Code's events to the bridge
   --codex         the same for Codex (merge into ~/.codex/hooks.json, then trust them with /hooks)
@@ -177,6 +182,11 @@ function main(): void {
     firmwareCommand(port, rest[0] ? resolvePath(rest[0]) : DEFAULT_FIRMWARE);
     return;
   }
+  if (command === 'voice-test') {
+    if (rest.length > 1) fail(`unexpected ${rest.slice(1).join(' ')}`);
+    voiceTest(rest[0] ? resolvePath(rest[0]) : join(CONFIG_DIR, 'voice-last.wav')).then((ok) => process.exit(ok ? 0 : 1));
+    return;
+  }
   if (command !== undefined) fail(`unknown command ${command}`);
   const only = args['fake-only'];
   serve({
@@ -206,6 +216,24 @@ function serve(o: ServeOptions): void {
   const simDir = o.sim ? fileURLToPath(new URL('../../simulator/web/', import.meta.url)) : null;
   const glyphs = Glyphs.load();
   const firmware = new FirmwareStore();
+  // Doubao once ~/.codetalky/doubao.json holds credentials; until then a stand-in.
+  let voice: Recognizer = new Placeholder();
+  try {
+    const doubao = loadDoubao();
+    if (doubao) voice = new Doubao(doubao, bridgeId(o.port));
+  } catch (e) {
+    log(`speech recognition: ${(e as Error).message}`);
+  }
+  // The last recording, to listen to when recognition goes wrong.
+  const lastVoice = join(CONFIG_DIR, 'voice-last.wav');
+  const recorded = (pcm: Buffer) => {
+    try {
+      mkdirSync(CONFIG_DIR, { recursive: true });
+      writeFileSync(lastVoice, wav(pcm));
+    } catch (e) {
+      log(`could not keep the recording: ${(e as Error).message}`);
+    }
+  };
 
   startServer(hub, realClock, {
     host: o.host,
@@ -218,6 +246,8 @@ function serve(o: ServeOptions): void {
       '/firmware': (body) => Promise.resolve(firmwareControl(firmware, body, log)),
     },
     firmware,
+    voice,
+    recorded,
     runs,
     allowRemoteDevices: o.insecureLan,
     pairing,
@@ -237,6 +267,7 @@ function serve(o: ServeOptions): void {
       console.log(`Claude Code hooks: http://127.0.0.1:${server.port}/hooks/claude (set up with: node src/main.ts hooks)`);
       if (simDir) console.log(`simulator: http://${local}:${server.port}/`);
       if (o.fake !== null) console.log(`fake agent: ${agents.length} sessions${o.speed === 1 ? '' : `, ${o.speed}x speed`}`);
+      console.log(voice.name === 'doubao' ? 'speech recognition: Doubao' : `speech recognition: none yet (put Doubao credentials in ${DOUBAO_FILE})`);
       // Devices on the network find this computer by a UDP broadcast on the same port number.
       const discovery = lan
         ? await startDiscovery({
@@ -288,6 +319,38 @@ function firmwareControl(store: FirmwareStore, body: unknown, log: (line: string
   } catch (e) {
     return { status: 400, body: { error: (e as Error).message } };
   }
+}
+
+/** Run a WAV through Doubao. If the configured resource id is refused, try the others
+ * and keep the one that works. */
+async function voiceTest(file: string): Promise<boolean> {
+  let config = loadDoubao();
+  if (config === null) {
+    console.error(`no Doubao credentials: put {"apiKey": "..."} in ${DOUBAO_FILE}`);
+    return false;
+  }
+  const data = readFileSync(file);
+  const pcm = data.subarray(44); // a plain 16 kHz mono 16-bit WAV
+  console.log(`${file}: ${(pcm.length / 32000).toFixed(1)} s`);
+  const order = [config.resourceId, ...DOUBAO_RESOURCES.filter((r) => r !== config!.resourceId)];
+  for (const resourceId of order) {
+    const rec = new Doubao({ ...config, resourceId }).start();
+    for (let i = 0; i < pcm.length; i += 1600) rec.push(pcm.subarray(i, i + 1600));
+    const started = Date.now();
+    try {
+      const text = await rec.finish();
+      console.log(`${resourceId}: "${text}" (${Date.now() - started} ms after the last packet)`);
+      if (resourceId !== config.resourceId) {
+        config = { ...config, resourceId };
+        writeFileSync(DOUBAO_FILE, `${JSON.stringify(config, null, 2)}\n`);
+        console.log(`saved ${resourceId} in ${DOUBAO_FILE}`);
+      }
+      return true;
+    } catch (e) {
+      console.log(`${resourceId}: ${(e as Error).message}`);
+    }
+  }
+  return false;
 }
 
 function firmwareCommand(port: number, file: string): void {

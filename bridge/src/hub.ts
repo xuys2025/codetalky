@@ -3,7 +3,7 @@
 // links read them and send the user's actions back through act().
 
 import type { Clock } from './clock.ts';
-import { LIMITS, type AckError, type Choice, type DeviceAction, type SessionSnapshot } from './protocol.ts';
+import { LIMITS, type AckError, type Choice, type DeviceAction, type ReplyHow, type SessionSnapshot } from './protocol.ts';
 
 /** How a source carries out the user's actions on one of its sessions. */
 export interface SessionControl {
@@ -11,8 +11,12 @@ export interface SessionControl {
   decide?(req: string, allow: boolean, text?: string): void;
   /** Answer the pending question: an option, several, or the user's own words. */
   answer?(req: string, choice: Choice): void;
-  /** Give the agent a new instruction. */
-  reply?(text: string): void;
+  /**
+   * Give the agent a new instruction. how: 'now' to interject while it works (it takes
+   * the words after its current step), 'stop' to interrupt it first (text may then be
+   * empty: just stop); unset: wait until it is done with this turn.
+   */
+  reply?(text: string, how?: ReplyHow): void;
 }
 
 export type HubEvent = { type: 'changed'; id: string } | { type: 'removed'; id: string } | { type: 'devices' };
@@ -131,9 +135,9 @@ export class Hub {
       }
       case 'reply': {
         const text = action.text.trim();
-        if (text.length === 0 || text.length > LIMITS.replyText) return 'bad';
+        if ((text.length === 0 && action.how !== 'stop') || text.length > LIMITS.replyText) return 'bad';
         if (!snapshot.reply || !control.reply) return 'unsupported';
-        control.reply(text);
+        control.reply(text, action.how);
         return null;
       }
       case 'seen':

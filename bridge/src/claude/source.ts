@@ -14,8 +14,16 @@
 // Managed runs (codetalky claude/codex) show on the device as soon as their terminal
 // opens, before the agent has a session (Codex starts one only at the first prompt),
 // and keep that one entry across the agent's sessions (/clear).
+//
+// Subagents (Claude's Agent tool) run inside their session: their hooks carry its
+// session id plus agent_id and agent_type (checked with Claude Code 2.1.325). They show
+// as part of the session, marked with their type. Only what they change or run is
+// logged, not what they read (an Explore agent reads dozens of files). A subagent may
+// work in its own worktree: its folder is not the session's. A session whose turn ends
+// while subagents work in the background stays busy: Claude Code wakes it with their
+// report (a prompt it writes itself), and it stops again after that.
 
-import { LIMITS, type ApproveAsk, type Choice, type PlanAsk, type QuestionAsk, type SessionSnapshot } from '../protocol.ts';
+import { LIMITS, type ApproveAsk, type Choice, type PlanAsk, type QuestionAsk, type ReplyHow, type SessionSnapshot } from '../protocol.ts';
 import type { Clock } from '../clock.ts';
 import type { Hub } from '../hub.ts';
 import type { IncomingHttpHeaders } from 'node:http';
@@ -117,6 +125,36 @@ const firstLine = (text: string, max = 120) => {
   return line.length > max ? `${line.slice(0, max)}…` : line;
 };
 
+/** A subagent's tool calls are marked with its type: "Explore › src/cart.ts". */
+function byOf(event: Event): string | undefined {
+  if (typeof event.agent_id !== 'string' || !event.agent_id) return undefined;
+  const type = str(event.agent_type);
+  return `${!type || type === 'general-purpose' ? '子代理' : type} › `;
+}
+
+/**
+ * Prompts Claude Code writes itself to wake the agent: a subagent or a background task
+ * reporting back. How the log shows one; undefined for the user's own words.
+ */
+function injected(prompt: string): { verb: string; target: string } | undefined {
+  const p = prompt.trimStart();
+  if (p.startsWith('<agent-message')) return { verb: 'Agent', target: '子代理交回结果' };
+  if (p.startsWith('<task-notification')) {
+    const summary = /<summary>([^<]*)<\/summary>/.exec(p)?.[1]?.trim();
+    return { verb: '后台', target: summary ? firstLine(summary) : '后台任务有结果了' };
+  }
+  return undefined;
+}
+
+/** In-flight background subagents, from a Stop hook: what each one does. */
+function backgroundAgents(tasks: unknown): string[] {
+  if (!Array.isArray(tasks)) return [];
+  return tasks
+    .map(obj)
+    .filter((t) => t.type === 'subagent')
+    .map((t) => str(t.description) ?? str(t.agent_type) ?? '');
+}
+
 interface Question {
   question: string;
   header?: string;
@@ -141,6 +179,8 @@ interface Held {
   input: Record<string, unknown>;
   /** The agent's id for the tool call, when its hook says. */
   toolUseId?: string;
+  /** Asked by a subagent (its agent_id); undefined: by the session's own agent. */
+  agent?: string;
   /** Not held: the agent's own prompt is up in the terminal, and the device answers it with keys. */
   viaKeys?: boolean;
   /** A key press for it is on its way to the terminal. */
@@ -171,12 +211,20 @@ interface Session {
   waiting: boolean;
   /** Instructions from the device that wait for the agent to finish its turn. */
   queued: string[];
+  /** Interjections and interruptions (reply how 'now' / 'stop'): typed at once, unless a prompt is up. */
+  urgent: { text: string; stop: boolean }[];
+  /** Interjections typed and logged already: their UserPromptSubmit, if any, isn't logged twice. */
+  steered: string[];
   /**
    * One of them was typed and the agent hasn't started on it yet: the next waits for
    * the turn after (it would otherwise go out before the agent says it's busy).
    * Calling it stops the timer that gives up waiting.
    */
   typed: (() => void) | null;
+  /** Whose prompt it waits at the computer for (s.there): a subagent's agent_id, or undefined. */
+  thereFor: string | undefined;
+  /** Subagents seen in it (agent_id), to log each once. */
+  agents: Set<string>;
 }
 
 const emptyCounts = () => ({ read: 0, edit: 0, new: 0, cmd: 0, add: 0, del: 0 });
@@ -200,6 +248,8 @@ export class ClaudeSource {
   private readonly agent: 'claude' | 'codex';
   private readonly tools: ToolKit;
   private readonly sessions = new Map<string, Session>();
+  /** Sessions whose interjections are being sent right now (see sendUrgent). */
+  private readonly sendingUrgent = new Set<Session>();
   /** The agent's session id -> the device's, where they differ (a managed run's entry was there first). */
   private readonly aliases = new Map<string, string>();
   private nextReq = 1;
@@ -224,10 +274,12 @@ export class ClaudeSource {
       if (event.type === 'changed' && this.sessions.get(event.id)?.ended && hub.get(event.id)?.state === 'idle') {
         this.forget(event.id);
       }
-      // A turn is over: an instruction that waited for it can go now.
+      // A turn is over: an instruction that waited for it can go now. A question was
+      // answered: an interjection that waited for that can go.
       if (event.type === 'changed') {
         const session = this.sessions.get(event.id);
         if (session && session.queued.length > 0) this.sendQueued(session);
+        if (session && session.urgent.length > 0) this.sendUrgent(session);
       }
     });
     this.unsubscribeRuns = options.runs?.subscribe((event) => this.onRun(event)) ?? (() => {});
@@ -300,7 +352,11 @@ export class ClaudeSource {
       token: run,
       waiting: true,
       queued: [],
+      urgent: [],
+      steered: [],
       typed: null,
+      thereFor: undefined,
+      agents: new Set(),
     };
     this.sessions.set(id, session);
     this.put(id, cwd || undefined, true);
@@ -328,7 +384,7 @@ export class ClaudeSource {
       {
         decide: (req, allow, text) => this.decide(id, req, allow, text),
         answer: (req, choice) => this.answer(id, req, choice),
-        reply: (text) => this.reply(id, text),
+        reply: (text, how) => this.reply(id, text, how),
       },
     );
   }
@@ -362,25 +418,41 @@ export class ClaudeSource {
     return this.dispatch(event as Event, typeof run === 'string' && /^[0-9a-f-]{36}$/.test(run) ? run : null, gone);
   }
 
-  /** The run token from a session's hooks. While that run's launcher is connected the device can type into it. */
+  /**
+   * The run token from a session's hooks. While that run's launcher is connected the
+   * device can type into it, and it is named after the folder that terminal was opened
+   * in: the agent may work in a subfolder, or have resumed a session from elsewhere.
+   */
   private setToken(session: Session, token: string | null): void {
     session.token = token;
     const managed = token !== null && (this.options.runs?.has(token) ?? false);
-    if (this.hub.get(session.id)?.reply !== managed) {
+    const home = token !== null ? this.options.runs?.cwdOf(token) : undefined;
+    const shown = this.hub.get(session.id);
+    if (shown?.reply !== managed || (home && shown?.name !== baseName(home))) {
       this.change(session.id, (s) => {
         s.reply = managed;
+        if (home) s.name = baseName(home);
       });
     }
   }
 
   /**
-   * An instruction from the device, typed into the agent's terminal. While the agent is
-   * working it waits here until the turn is over: mid-turn the agent may put up a
-   * prompt at any moment, and the instruction's Enter would answer it.
+   * An instruction from the device, typed into the agent's terminal. how 'now': at once,
+   * also mid-turn (the agent takes it after its current step: the user steering it);
+   * 'stop': interrupt it first. Unset (older devices): it waits until the turn is over.
+   * Either way the launcher types only while no prompt is on the screen, since the
+   * instruction's Enter would answer it.
    */
-  private reply(id: string, text: string): void {
+  private reply(id: string, text: string, how?: ReplyHow): void {
     const session = this.sessions.get(id);
     if (!session?.token) return;
+    if (how) {
+      // An interruption goes ahead of interjections still waiting for a prompt to close.
+      if (how === 'stop') session.urgent.unshift({ text, stop: true });
+      else session.urgent.push({ text, stop: false });
+      this.sendUrgent(session);
+      return;
+    }
     session.queued.push(text);
     this.sendQueued(session);
     if (session.queued.length > 0) {
@@ -403,6 +475,47 @@ export class ClaudeSource {
       session.typed = null;
       this.sendQueued(session);
     });
+  }
+
+  /**
+   * Interjections and interruptions go at once, except an interjection while the agent
+   * asks something (approval, a question): it waits until that is answered. An
+   * interruption goes even then: its Esc dismisses the prompt, and the request on the
+   * device ends with it.
+   */
+  private sendUrgent(session: Session): void {
+    // Its own changes below call it again (through the hub): one loop at a time keeps the order.
+    if (!session.token || !this.options.runs?.has(session.token) || this.sendingUrgent.has(session)) return;
+    this.sendingUrgent.add(session);
+    try {
+      this.sendUrgentNow(session, session.token);
+    } finally {
+      this.sendingUrgent.delete(session);
+    }
+  }
+
+  private sendUrgentNow(session: Session, token: string): void {
+    while (session.urgent.length > 0) {
+      const next = session.urgent[0]!;
+      const state = this.hub.get(session.id)?.state;
+      if (!next.stop && (state === 'approve' || state === 'question')) return;
+      session.urgent.shift();
+      this.options.runs!.type(token, next.text, next.stop);
+      // The Esc dismisses whatever prompt is up: the requests the device holds end with it.
+      if (next.stop) this.releaseAll(session, '');
+      if (next.text) session.steered.push(next.text);
+      if (session.steered.length > 10) session.steered.shift(); // in case the agent never reports some
+      this.change(session.id, (s) => {
+        if (next.stop && !next.text) {
+          // Just stop. Claude Code runs no Stop hook when interrupted: say so here.
+          s.state = 'idle';
+          s.since = this.now();
+          delete s.now;
+          s.say = '停下了，等你的下一条指令';
+        }
+        this.log(s, { verb: next.stop ? '打断' : '插话', target: next.text ? firstLine(next.text) : '让它停下' });
+      });
+    }
   }
 
   /** The agent started on a prompt: the next instruction waits for the end of this turn. */
@@ -460,14 +573,21 @@ export class ClaudeSource {
         token: null,
         waiting: false,
         queued: [],
+        urgent: [],
+        steered: [],
         typed: null,
+        thereFor: undefined,
+        agents: new Set(),
       };
       this.sessions.set(id, session);
       this.put(id, cwd, false); // replies stay off until a managed run claims it
       this.options.log(`${this.agent} session ${id.slice(0, 8)} in ${cwd ?? '?'}`);
     }
-    this.attach(session, transcript);
-    if (cwd) session.cwd = cwd;
+    if (run) this.dropPlaceholders(session, run);
+    // A subagent may work in its own folder (a worktree): the session's stays.
+    const sub = typeof event.agent_id === 'string' && event.agent_id !== '';
+    if (!transcript || !/[\\/]subagents[\\/]/.test(transcript)) this.attach(session, transcript);
+    if (cwd && !sub) session.cwd = cwd;
     session.lastEvent = this.now();
     if (run !== session.token) this.setToken(session, run);
     // What hooks don't say: model, branch and the latest thing Claude wrote.
@@ -513,10 +633,29 @@ export class ClaudeSource {
     const cwd = str(event.cwd);
     const raw = { tool: str(event.tool_name) ?? '', input: obj(event.tool_input) };
     const { tool, input } = this.tools.normalize?.(raw.tool, raw.input) ?? raw;
+    const agent = str(event.agent_id) || undefined;
+    const by = byOf(event);
+    if (agent && !session.agents.has(agent)) {
+      session.agents.add(agent);
+      this.options.log(`${this.agent} session ${id.slice(0, 8)}: subagent ${str(event.agent_type) ?? '?'} ${agent.slice(0, 12)}`);
+    }
     switch (event.hook_event_name) {
       case 'SessionStart':
         return NO_DECISION;
-      case 'UserPromptSubmit':
+      case 'UserPromptSubmit': {
+        const woken = injected(str(event.prompt) ?? '');
+        if (woken) {
+          // Work it left in the background reported back: the same task goes on.
+          this.change(id, (s) => {
+            if (!isBusy(s.state)) {
+              s.state = 'running';
+              s.since = this.now();
+              delete s.now;
+            }
+            this.log(s, woken);
+          });
+          return NO_DECISION;
+        }
         this.releaseKeyed(session);
         this.change(id, (s) => {
           // Sent while it was still working (queued, or typed mid-turn): part of the same task.
@@ -537,21 +676,40 @@ export class ClaudeSource {
           }
           doneThere(s);
           if (session.queued.length > 0) s.say = waitingSay(session.queued);
-          this.log(s, { verb: '你', target: firstLine(str(event.prompt) ?? '') });
+          // An interjection was logged when it was typed.
+          const prompt = str(event.prompt) ?? '';
+          const steered = session.steered.indexOf(prompt.trim());
+          if (steered >= 0) session.steered.splice(steered, 1);
+          else this.log(s, { verb: '你', target: firstLine(prompt) });
         });
         // Only now that it shows as working: before, the change above could let the next one go.
         this.taken(session);
         return NO_DECISION;
+      }
       case 'PreToolUse':
         if (tool === 'AskUserQuestion') return this.holdQuestion(session, input, gone);
         // The next tool call: the terminal prompt before it has been answered.
         this.releaseKeyed(session);
+        if (by) {
+          // A subagent at work (its to-do list is its own). Something the device shows
+          // for the session itself, a request, stays up.
+          this.change(id, (s) => {
+            if (s.state === 'approve' || s.state === 'question') return;
+            if (s.state !== 'running') {
+              s.state = 'running';
+              s.since = this.now();
+            }
+            this.movedOn(session, s, agent);
+            if (tool !== 'TodoWrite') s.now = { verb: this.tools.verbOf(tool), target: by + this.tools.targetOf(tool, input, cwd) };
+          });
+          return NO_DECISION;
+        }
         this.change(id, (s) => {
           if (s.state !== 'approve' && s.state !== 'question' && s.state !== 'running') {
             s.state = 'running';
             s.since = this.now();
           }
-          doneThere(s);
+          this.movedOn(session, s, agent);
           if (tool === 'TodoWrite') {
             const todos = todosFrom(input);
             if (todos) s.todos = todos;
@@ -563,47 +721,62 @@ export class ClaudeSource {
       case 'PermissionRequest':
         if (tool === 'ExitPlanMode') return this.holdPlan(session, input, gone);
         if (tool === 'AskUserQuestion') return NO_DECISION;
-        return this.holdPermission(session, tool, input, cwd, gone, str(event.tool_use_id));
+        return this.holdPermission(session, tool, input, cwd, gone, str(event.tool_use_id), agent, by);
       case 'PostToolUse':
         this.settled(session, tool, input, str(event.tool_use_id));
         this.change(id, (s) => {
-          doneThere(s);
+          this.movedOn(session, s, agent);
           if (tool === 'TodoWrite' || tool === 'AskUserQuestion') return;
           // Codex's session file has its file changes, with the exact diff.
           if (session.rollout && this.tools.isFileTool(tool)) return;
-          this.record(s, tool, input, event.tool_response, cwd);
+          this.record(s, tool, input, event.tool_response, cwd, by);
         });
         return NO_DECISION;
       case 'PostToolUseFailure':
         this.settled(session, tool, input, str(event.tool_use_id));
         this.change(id, (s) => {
-          doneThere(s);
+          this.movedOn(session, s, agent);
+          if (by && this.quiet(tool)) return; // a subagent's failed look-up: it tries another way
           const full = this.tools.targetOf(tool, input, cwd);
-          const target = this.tools.isFileTool(tool) ? baseName(full) : full;
+          const target = (by ?? '') + (this.tools.isFileTool(tool) ? baseName(full) : full);
           this.log(s, { verb: this.tools.verbOf(tool), target, res: event.is_interrupt === true ? '中断' : '失败', bad: true });
         });
         return NO_DECISION;
       case 'Notification':
         if (event.notification_type === 'permission_prompt' && session.held.length === 0) {
+          session.thereFor = agent;
           this.change(id, (s) => {
             waitThere(s);
           });
         }
         return NO_DECISION;
-      case 'Stop':
-        this.releaseAll(session, '');
+      case 'Stop': {
+        // Its own requests end with the turn; background subagents may still be asking.
+        this.releaseAll(session, '', false, (h) => h.agent === undefined);
+        const waitingFor = backgroundAgents(event.background_tasks);
         this.change(id, (s) => {
           const text = str(event.last_assistant_message) ?? '';
-          s.state = 'done';
-          s.since = this.now();
           s.report = reportFromMarkdown(text);
           if (text) s.say = firstWords(text);
+          if (session.held.length > 0) return; // a background subagent's request is on the device
           delete s.ask;
+          if (waitingFor.length > 0) {
+            // It ended its turn to wait for subagents working in the background; it goes
+            // on when they report back (and stops again then).
+            if (s.state !== 'running') s.since = this.now();
+            s.state = 'running';
+            const one = waitingFor.length === 1 ? waitingFor[0] : undefined;
+            s.now = { verb: 'Agent', target: one ? `后台：${one}` : `后台 ${waitingFor.length} 个子代理` };
+            return;
+          }
+          s.state = 'done';
+          s.since = this.now();
           delete s.now;
         });
         return NO_DECISION;
+      }
       case 'StopFailure':
-        this.releaseAll(session, '');
+        this.releaseAll(session, '', false, (h) => h.agent === undefined);
         this.change(id, (s) => {
           s.state = 'error';
           s.since = this.now();
@@ -633,10 +806,26 @@ export class ClaudeSource {
     }
   }
 
-  /** A finished tool call: log it, count it, keep its file changes. */
-  private record(s: SessionSnapshot, tool: string, input: Record<string, unknown>, response: unknown, cwd: string | undefined): void {
+  /** A finished tool call: log it, count it, keep its file changes. by: a subagent's ("Explore › "). */
+  private record(s: SessionSnapshot, tool: string, input: Record<string, unknown>, response: unknown, cwd: string | undefined, by?: string): void {
     const result = this.tools.resultOf(tool, input, response, cwd);
-    this.keep(s, tool, this.tools.targetOf(tool, input, cwd), result);
+    this.keep(s, tool, this.tools.targetOf(tool, input, cwd), result, by);
+  }
+
+  /** Calls that only look something up. A subagent's are counted but not logged. */
+  private quiet(tool: string): boolean {
+    const counter = this.tools.counterOf(tool, false);
+    return counter === 'read' || (counter === null && !tool.startsWith('mcp__') && tool !== 'Agent' && tool !== 'Task');
+  }
+
+  /**
+   * An event from this agent (undefined: the session's own): whatever prompt of it the
+   * session waited for at the computer has been dealt with. Another agent's event says
+   * nothing about it: subagents work side by side.
+   */
+  private movedOn(session: Session, s: SessionSnapshot, agent: string | undefined): void {
+    if (s.there && session.thereFor !== agent) return;
+    doneThere(s);
   }
 
   /** A Codex apply_patch that completed, from its session file. */
@@ -648,15 +837,17 @@ export class ClaudeSource {
     doneThere(s);
   }
 
-  private keep(s: SessionSnapshot, tool: string, target: string, result: ToolResult): void {
-    this.log(s, {
-      verb: this.tools.verbOf(tool),
-      target: this.tools.isFileTool(tool) ? baseName(target) : target,
-      add: result.add,
-      del: result.del,
-      res: result.add === undefined ? result.res : undefined,
-      bad: result.bad,
-    });
+  private keep(s: SessionSnapshot, tool: string, target: string, result: ToolResult, by?: string): void {
+    if (!by || !this.quiet(tool) || result.bad) {
+      this.log(s, {
+        verb: this.tools.verbOf(tool),
+        target: (by ?? '') + (this.tools.isFileTool(tool) ? baseName(target) : target),
+        add: result.add,
+        del: result.del,
+        res: result.add === undefined ? result.res : undefined,
+        bad: result.bad,
+      });
+    }
     const counter = this.tools.counterOf(tool, result.created);
     if (counter) s.n[counter] += 1;
     s.n.add += result.add ?? 0;
@@ -761,14 +952,18 @@ export class ClaudeSource {
     }
     if (why) {
       this.change(session.id, (s) => {
-        if (there && s.state === 'running') waitThere(s, why);
-        else s.say = why;
+        if (there && s.state === 'running') {
+          session.thereFor = held.agent;
+          waitThere(s, why);
+        } else {
+          s.say = why;
+        }
       });
     }
   }
 
-  private releaseAll(session: Session, why: string, there = false): void {
-    for (const held of [...session.held].reverse()) this.release(session, held, why, there);
+  private releaseAll(session: Session, why: string, there = false, which: (held: Held) => boolean = () => true): void {
+    for (const held of [...session.held].reverse()) if (which(held)) this.release(session, held, why, there);
   }
 
   /** The agent moved on: whatever prompt was up in its terminal has been answered there. */
@@ -783,6 +978,8 @@ export class ClaudeSource {
     cwd: string | undefined,
     gone?: AbortSignal,
     toolUseId?: string,
+    agent?: string,
+    by?: string,
   ): Promise<PostReply> {
     const managed = session.token !== null && (this.options.runs?.has(session.token) ?? false);
     if (this.options.terminalKeys && !managed) {
@@ -799,9 +996,11 @@ export class ClaudeSource {
     if (this.noDevice()) return Promise.resolve(NO_DECISION);
     const body = this.tools.askOf(tool, input, cwd);
     const snapshot = this.hub.get(session.id);
+    // The session's last words are about its own work, not what a subagent is doing.
+    if (!body.why && by) body.why = by === '子代理 › ' ? '子代理要做这一步' : `${by.slice(0, -3)} 子代理要做这一步`;
     if (!body.why && snapshot?.say) body.why = snapshot.say;
     const req = `r${this.nextReq++}`;
-    const held = { req, ask: { kind: 'approve', req, ...body } as ApproveAsk, tool, target: body.target, input, toolUseId };
+    const held = { req, ask: { kind: 'approve', req, ...body } as ApproveAsk, tool, target: body.target, input, toolUseId, agent };
     if (this.options.terminalKeys) {
       // The agent would not draw its own prompt while this hook waits. Let it draw it
       // now; the device answers it by pressing keys in the terminal.
@@ -838,11 +1037,13 @@ export class ClaudeSource {
 
   private questionAsk(req: string, questions: Question[], index: number): QuestionAsk {
     const q = questions[index]!;
+    // Claude marks the option it suggests in English; the answer keeps its label as is.
+    const shown = (label: string) => label.replace(/\s*\(Recommended\)\s*$/i, '（推荐）');
     const ask: QuestionAsk = {
       kind: 'question',
       req,
       text: q.question,
-      options: q.options.map((o) => (o.description ? { label: o.label, desc: o.description } : { label: o.label })),
+      options: q.options.map((o) => (o.description ? { label: shown(o.label), desc: o.description } : { label: shown(o.label) })),
     };
     if (q.multiSelect) ask.multi = true;
     const note = [questions.length > 1 ? `第 ${index + 1}/${questions.length} 题` : '', q.header ?? '', q.multiSelect ? '可以多选' : '']
@@ -977,6 +1178,23 @@ export class ClaudeSource {
       },
     });
     this.advance(session);
+  }
+
+  /**
+   * A run's terminal turned out to run this session, which was on the device already
+   * (resumed with --resume or /resume, 2026-11-16): the entry the run put up while
+   * waiting for its first session is not needed. What was sent to it goes along.
+   */
+  private dropPlaceholders(session: Session, run: string): void {
+    for (const other of [...this.sessions.values()]) {
+      if (other === session || !other.waiting || other.token !== run) continue;
+      session.queued.push(...other.queued);
+      session.urgent.push(...other.urgent);
+      session.steered.push(...other.steered);
+      for (const [own, to] of this.aliases) if (to === other.id) this.aliases.delete(own);
+      this.forget(other.id);
+      this.options.log(`${this.agent} run ${run.slice(0, 8)} took up session ${session.id.slice(0, 8)}`);
+    }
   }
 
   private forget(id: string): void {

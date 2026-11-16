@@ -57,6 +57,14 @@ DEFAULTS_SUM="$(md5sum sdkconfig.defaults | cut -d' ' -f1)"
 if [ "$DEFAULTS_SUM" != "$(cat "$BUILD/.ct-defaults" 2>/dev/null)" ]; then
   rm -f "$BUILD/sdkconfig"
 fi
+# LVGL comes from the component manager, with our patches on top (third_party/
+# lvgl-patches). A fresh build directory fetches it first. The manager only checks
+# the hash it saved at download, so the patched files stay.
+LVGL_DIR="$WORK/firmware/managed_components/lvgl__lvgl"
+if [ ! -d "$LVGL_DIR" ]; then
+  idf.py -B "$BUILD" -D SDKCONFIG="$BUILD/sdkconfig" reconfigure >/dev/null
+fi
+bash "$ROOT/third_party/lvgl-patches/apply.sh" "$LVGL_DIR"
 idf.py -B "$BUILD" -D SDKCONFIG="$BUILD/sdkconfig" build
 printf '%s' "$SOURCES" > "$BUILD/.ct-sources"
 echo "$DEFAULTS_SUM" > "$BUILD/.ct-defaults"

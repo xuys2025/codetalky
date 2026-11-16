@@ -301,7 +301,7 @@ export function startServer(hub: Hub, clock: Clock, options: ServerOptions): Pro
       ws.on('pong', () => alive.set(ws, true));
       options.log(`device connected from ${peer}`);
       ws.on('message', (data, isBinary) => {
-        if (isBinary) return; // audio frames: phase 3
+        if (isBinary) return; // everything is text (voice comes as base64 inside encrypted frames)
         const known = link.device !== null;
         if (!link.receive(data.toString())) {
           ws.close(4000, 'protocol');

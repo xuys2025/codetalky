@@ -12,7 +12,8 @@ export type FromRun =
   /** Answer to a press: ok is false if the screen didn't show what was expected. */
   | { t: 'pressed'; id: number; ok: boolean };
 export type ToRun =
-  | { t: 'type'; text: string }
+  /** stop: press Esc first (interrupt the agent); text may then be empty. */
+  | { t: 'type'; text: string; stop?: boolean }
   /**
    * Press keys, but only if the screen matches expect (a case-insensitive regular
    * expression: the agent's prompt is up) and that prompt shows needle (what this
@@ -55,11 +56,16 @@ export class Runs {
     return this.runs.has(run);
   }
 
-  /** Type a line into a run's terminal. False if the run is gone. */
-  type(run: string, text: string): boolean {
+  /** The folder its terminal was opened in. */
+  cwdOf(run: string): string | undefined {
+    return this.runs.get(run)?.cwd || undefined;
+  }
+
+  /** Type a line into a run's terminal; stop: interrupt the agent first. False if the run is gone. */
+  type(run: string, text: string, stop = false): boolean {
     const r = this.runs.get(run);
     if (!r) return false;
-    r.send({ t: 'type', text });
+    r.send(stop ? { t: 'type', text, stop } : { t: 'type', text });
     return true;
   }
 

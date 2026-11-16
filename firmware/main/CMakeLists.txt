@@ -12,7 +12,7 @@ idf_component_register(
     INCLUDE_DIRS . ${ROOT}/ui/include ${ROOT}/ui/src ${ROOT}/ui/fonts/gen ${ROOT}/third_party/monocypher
     REQUIRES lvgl json esp_lcd esp_driver_gpio esp_driver_spi esp_driver_i2c esp_wifi esp_netif
              esp_event nvs_flash esp_timer lwip esp_websocket_client esp_hw_support esp_pm
-             app_update esp_app_format esp_http_client mbedtls)
+             app_update esp_app_format esp_http_client mbedtls esp_driver_i2s esp_driver_uart)
 
 # Third-party code and generated fonts: not ours to keep warning-free.
 set_source_files_properties(${ROOT}/third_party/monocypher/monocypher.c ${FONT_SRCS}
