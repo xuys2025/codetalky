@@ -36,7 +36,7 @@ import { FirmwareStore, readImage } from './firmware.ts';
 import { resolve as resolvePath } from 'node:path';
 
 const USAGE = `usage: node src/main.ts [--name N] [--fake] [--fake-only IDS] [--speed N] [--hold S]
-                        [--host H] [--port P] [--no-sim] [--insecure-lan]
+                        [--host H] [--port P] [--no-sim] [--insecure-lan] [--device-log]
        node src/main.ts hooks [--codex] [--merge FILE | --remove FILE] [--port P] [--hold S]
        node src/main.ts claude [claude's own options]     (or codex, or run -- CMD ...)
 
@@ -53,6 +53,8 @@ const USAGE = `usage: node src/main.ts [--name N] [--fake] [--fake-only IDS] [--
   --insecure-lan  let devices from other machines in without pairing. Testing only:
                   anyone on the network could approve on your behalf.
   --require-pairing  make devices on this machine pair too (to try pairing in the simulator)
+  --device-log    print the firmware's log, which devices send over the network
+                  (debugging without a USB cable)
 
   pair            start pairing: devices on the network get a code for 5 minutes;
                   type the code the device shows when asked
@@ -86,6 +88,7 @@ interface ServeOptions {
   sim: boolean;
   insecureLan: boolean;
   requirePairing: boolean;
+  deviceLog: boolean;
 }
 
 /** `codetalky claude ...`, `codetalky codex ...`, `codetalky run -- CMD ...`: everything after goes to the agent. */
@@ -125,6 +128,7 @@ function main(): void {
         'no-sim': { type: 'boolean', default: false },
         'insecure-lan': { type: 'boolean', default: false },
         'require-pairing': { type: 'boolean', default: false },
+        'device-log': { type: 'boolean', default: false },
         codex: { type: 'boolean', default: false },
         merge: { type: 'string' },
         remove: { type: 'string' },
@@ -185,6 +189,7 @@ function main(): void {
     sim: !args['no-sim'],
     insecureLan: args['insecure-lan'],
     requirePairing: args['require-pairing'],
+    deviceLog: args['device-log'],
   });
 }
 
@@ -234,7 +239,14 @@ function serve(o: ServeOptions): void {
       if (o.fake !== null) console.log(`fake agent: ${agents.length} sessions${o.speed === 1 ? '' : `, ${o.speed}x speed`}`);
       // Devices on the network find this computer by a UDP broadcast on the same port number.
       const discovery = lan
-        ? await startDiscovery({ port: server.port, wsPort: server.port, hostId: bridgeId(o.port), hostName: o.name, log }).catch(
+        ? await startDiscovery({
+            port: server.port,
+            wsPort: server.port,
+            hostId: bridgeId(o.port),
+            hostName: o.name,
+            log,
+            deviceLog: o.deviceLog,
+          }).catch(
             (err: Error) => {
               console.log(`devices cannot find this computer by themselves (UDP ${server.port}: ${err.message})`);
               return null;
@@ -290,7 +302,7 @@ function firmwareCommand(port: number, file: string): void {
       console.log(
         told > 0
           ? `firmware ${String(data.version)} sent to ${told} device(s); each downloads it, checks it and restarts (about half a minute)`
-          : `firmware ${String(data.version)} is ready, but no connected device can take it (not paired, already on it, or too old to update itself)`,
+          : `firmware ${String(data.version)} is ready; no connected device needs it now (not paired, already on it, or too old to update itself). Paired devices that connect later get it then.`,
       );
     })
     .catch(() => {

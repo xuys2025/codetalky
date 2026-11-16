@@ -50,6 +50,25 @@ test('a device reporting its battery is logged, not answered', async () => {
   }
 });
 
+test('mirrored device log lines are printed only when asked for', async () => {
+  const lines: string[] = [];
+  const quiet = await startDiscovery({ port: 0, wsPort: 8137, hostId: 'abc:8137', hostName: 'pc', log: (l) => lines.push(l) });
+  try {
+    assert.equal(await ask(quiet.port, '{"t":"log","s":"I (1200) main: hello\\n"}'), null);
+    assert.equal(lines.length, 0);
+  } finally {
+    await quiet.close();
+  }
+  const d = await startDiscovery({ port: 0, wsPort: 8137, hostId: 'abc:8137', hostName: 'pc', log: (l) => lines.push(l), deviceLog: true });
+  try {
+    const long = 'x'.repeat(500);
+    assert.equal(await ask(d.port, `{"t":"log","s":"\\u001b[0;32mI (1200) main: ${long}\\u001b[0m\\n"}`), null);
+    assert.deepEqual(lines, [`device 127.0.0.1| I (1200) main: ${long}`]);
+  } finally {
+    await d.close();
+  }
+});
+
 test('anything that is not a find is ignored', async () => {
   const d = await startDiscovery({ port: 0, wsPort: 8137, hostId: 'abc:8137', hostName: 'pc', log: () => {} });
   try {

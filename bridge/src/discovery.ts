@@ -15,6 +15,8 @@ export interface DiscoveryOptions {
   hostId: string;
   hostName: string;
   log: (line: string) => void;
+  /** Print the log lines devices mirror over UDP (firmware debugging without a cable). */
+  deviceLog?: boolean;
 }
 
 export interface Discovery {
@@ -24,6 +26,8 @@ export interface Discovery {
 
 /** A find request is tiny; anything bigger is not for us. */
 const MAX_REQUEST = 256;
+/** A mirrored log line can be longer. */
+const MAX_LOG = 1024;
 
 /** Battery and power readings the firmware sends every few seconds while testing. */
 interface Diag {
@@ -65,7 +69,7 @@ export function startDiscovery(o: DiscoveryOptions): Promise<Discovery> {
   const reply = Buffer.from(JSON.stringify({ t: 'here', proto: PROTO, hostId: o.hostId, host: o.hostName, port: o.wsPort }));
   const seen = new Set<string>();
   sock.on('message', (msg, from) => {
-    if (msg.length > MAX_REQUEST) return;
+    if (msg.length > MAX_LOG) return;
     let req: unknown;
     try {
       req = JSON.parse(msg.toString('utf8'));
@@ -73,6 +77,15 @@ export function startDiscovery(o: DiscoveryOptions): Promise<Discovery> {
       return;
     }
     if (typeof req !== 'object' || req === null) return;
+    if ((req as { t?: unknown }).t === 'log') {
+      const s = (req as { s?: unknown }).s;
+      // Strip terminal colour codes and control characters; the Wi-Fi library also
+      // prints bare line ends.
+      const line = typeof s === 'string' ? s.replace(/\x1b\[[0-9;]*m|[\x00-\x1f]/g, '').trimEnd() : '';
+      if (o.deviceLog && line !== '') o.log(`device ${from.address}| ${line}`);
+      return;
+    }
+    if (msg.length > MAX_REQUEST) return;
     if ((req as { t?: unknown }).t === 'diag') {
       o.log(`device at ${from.address}: ${describeDiag(req as Diag)}`);
       return;

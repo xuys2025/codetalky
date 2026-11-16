@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "ct_art.h"
 #include "ct_hal.h"
 #include "ct_model.h"
 #include "ct_proto.h"
@@ -2207,4 +2208,45 @@ void ct_ui_on_key(ct_key_t key, bool down) {
     default:
         break;
     }
+}
+
+/* ---------- switched off ---------- */
+
+void ct_ui_show_off(bool battery_empty) {
+    lv_obj_t *screen = ct_screen_new();
+    lv_obj_set_layout(screen, LV_LAYOUT_NONE);
+
+    lv_obj_t *logo = lv_image_create(screen);
+    lv_image_set_src(logo, &ct_art_logo);
+    lv_obj_set_pos(logo, 0, 0);
+    lv_obj_t *fade = lv_image_create(screen);
+    lv_image_set_src(fade, &ct_art_fade);
+    lv_obj_align(fade, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+
+    /* Centred on the lines the art leaves free for them (y 440 and 478). */
+    lv_obj_t *title = ct_label(screen, B24, battery_empty ? "电量用完了，已关机" : "已关机");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 440 - lv_font_get_line_height(B24) / 2);
+    lv_obj_t *hint = ct_label(screen, F20, battery_empty ? "插上充电线再开机" : "按电源键开机");
+    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 478 - lv_font_get_line_height(F20) / 2);
+
+    /* White on the black band at the bottom: what the battery had, and when. */
+    char clock[8], line[48];
+    const int64_t now = ct_model_now();
+    const int battery = ct_hal_battery_percent();
+    ct_fmt_clock(clock, sizeof(clock), now);
+    if (battery >= 0 && now > 0) {
+        snprintf(line, sizeof(line), "电量 %d%% · %s 关机", battery, clock);
+    } else if (battery >= 0) {
+        snprintf(line, sizeof(line), "电量 %d%%", battery);
+    } else if (now > 0) {
+        snprintf(line, sizeof(line), "%s 关机", clock);
+    } else {
+        snprintf(line, sizeof(line), "codetalky");
+    }
+    lv_obj_t *info = ct_label(screen, M20, line);
+    ct_invert(info); /* over the art's black: the same black, tinted for white text */
+    lv_obj_align(info, LV_ALIGN_BOTTOM_MID, 0, -(CT_ART_FADE_SOLID - lv_font_get_line_height(M20)) / 2);
+
+    ct_hal_refresh_hint(CT_REFRESH_FULL);
+    lv_screen_load(screen);
 }

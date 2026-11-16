@@ -15,7 +15,7 @@ void ct_widgets_init(void) {
     }
     s_ready = true;
     lv_style_init(&s_pressed);
-    lv_style_set_bg_color(&s_pressed, lv_color_black());
+    lv_style_set_bg_color(&s_pressed, CT_INK_BG);
     lv_style_set_bg_opa(&s_pressed, LV_OPA_COVER);
     lv_style_set_text_color(&s_pressed, lv_color_white());
     lv_style_init(&s_pressed_inv);
@@ -100,7 +100,7 @@ lv_obj_t *ct_paragraph(lv_obj_t *parent, const lv_font_t *font, const char *text
 }
 
 void ct_invert(lv_obj_t *obj) {
-    lv_obj_set_style_bg_color(obj, lv_color_black(), 0);
+    lv_obj_set_style_bg_color(obj, CT_INK_BG, 0);
     lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
     lv_obj_set_style_text_color(obj, lv_color_white(), 0);
 }
@@ -158,7 +158,7 @@ static void on_pressed(lv_event_t *e) {
 void ct_tappable(lv_obj_t *obj, lv_event_cb_t on_click, void *user_data) {
     lv_obj_add_flag(obj, LV_OBJ_FLAG_CLICKABLE);
     const bool inverted = lv_obj_get_style_bg_opa(obj, 0) == LV_OPA_COVER &&
-                          lv_color_eq(lv_obj_get_style_bg_color(obj, 0), lv_color_black());
+                          lv_color_eq(lv_obj_get_style_bg_color(obj, 0), CT_INK_BG);
     lv_obj_add_style(obj, inverted ? &s_pressed_inv : &s_pressed, LV_STATE_PRESSED);
     lv_obj_add_event_cb(obj, on_pressed, LV_EVENT_PRESSED, NULL);
     if (on_click != NULL) {

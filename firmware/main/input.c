@@ -151,6 +151,7 @@ static void input_task(void *arg) {
     /* The power key is often still held from switching the device on: ignore it until released. */
     bool power_armed = gpio_get_level(POWER_KEY_PIN) != 0;
     int64_t power_down_at = 0;
+    int64_t power_logged_at = 0;
     int64_t off_asked_at = 0; /* the UI draws a "switched off" page first; if it hangs, go anyway */
     unsigned tick = 0;
     for (;;) {
@@ -163,18 +164,31 @@ static void input_task(void *arg) {
         } else {
             const bool was = power.down;
             key_update(&power, power_raw);
+            if (power.down != was) {
+                /* Logged (with the battery) for power-off debugging over the network. */
+                int mv = 0, ma = 0;
+                board_battery_sample(&mv, &ma);
+                ESP_LOGI(TAG, "power key %s (%d mV, %d mA)", power.down ? "down" : "up", mv, ma);
+                power_logged_at = esp_timer_get_time();
+            } else if (power.down && esp_timer_get_time() - power_logged_at >= 500 * 1000LL) {
+                int mv = 0, ma = 0;
+                board_battery_sample(&mv, &ma);
+                ESP_LOGI(TAG, "power key held (%d mV, %d mA)", mv, ma);
+                power_logged_at = esp_timer_get_time();
+            }
             if (power.down && !was) {
                 power_down_at = esp_timer_get_time();
             } else if (power.down && power_down_at != 0 &&
                        esp_timer_get_time() - power_down_at > POWER_OFF_HOLD_MS * 1000LL) {
                 power_down_at = 0; /* once per hold */
+                ESP_LOGW(TAG, "power key held 3 s: switching off");
                 board_vibrate(200);
                 const app_event_t ev = {.type = APP_EV_POWER_OFF, .a = 0};
                 app_post(&ev);
                 off_asked_at = esp_timer_get_time();
             }
         }
-        if (off_asked_at != 0 && esp_timer_get_time() - off_asked_at > 10LL * 1000 * 1000) {
+        if (off_asked_at != 0 && esp_timer_get_time() - off_asked_at > 15LL * 1000 * 1000) {
             board_power_off();
         }
         if (tick % 2 == 0) {

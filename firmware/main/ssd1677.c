@@ -49,9 +49,15 @@ static const char *TAG = "ssd1677";
 /* 0x22 sequences. With a waveform loaded by the MCU: */
 #define UPDATE_FULL_MCU 0xC7    /* clock, analog, display mode 1, off */
 #define UPDATE_PARTIAL_MCU 0xCF /* same in display mode 2 (compare old/new planes) */
-#define UPDATE_GREY_MCU 0xCC    /* clock, analog, display mode 2, keep them on */
+/* Clock, analog, display mode 2, and they stay on (as the vendor does). Switching
+ * them off after the grey pass (0xCF), as another SSD1677 project advises, made
+ * white areas on this panel turn greyish within minutes of standing still
+ * (2026-11-16): the powered panel apparently holds the grey levels. */
+#define UPDATE_GREY_MCU 0xCC
 /* Loading the panel's own waveform for the measured temperature: */
 #define UPDATE_FULL_OTP 0xF7
+/* Clock on, analog off, clock off: power down without touching the image. */
+#define UPDATE_POWER_OFF 0x83
 
 #define BUSY_TIMEOUT_MS 10000
 
@@ -164,6 +170,11 @@ esp_err_t ssd1677_refresh(ssd1677_mode_t mode, int *ms) {
 }
 
 esp_err_t ssd1677_sleep(void) {
+    /* The grey pass leaves the high-voltage supply on (UPDATE_GREY_MCU): switch it
+     * and the clock off properly before the controller sleeps or loses power. */
+    ESP_RETURN_ON_ERROR(cmd1(CMD_UPDATE_CTRL2, UPDATE_POWER_OFF), TAG, "ctrl2");
+    ESP_RETURN_ON_ERROR(cmd(CMD_ACTIVATE, NULL, 0), TAG, "activate");
+    ESP_RETURN_ON_ERROR(wait_busy(NULL), TAG, "power off busy");
     return cmd1(CMD_DEEP_SLEEP, 0x01);
 }
 

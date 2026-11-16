@@ -6,7 +6,6 @@
 #include "app.h"
 #include "board.h"
 #include "charger.h"
-#include "ct_widgets.h"
 #include "ct_ui.h"
 #include "epd.h"
 #include "esp_heap_caps.h"
@@ -42,17 +41,17 @@ static uint32_t tick_ms(void) {
 /* A last page, since e-ink keeps showing whatever was on it, then power off. */
 static void power_off(bool battery_empty) {
     ESP_LOGW(TAG, "%s", battery_empty ? "battery empty: switching off" : "switching off");
-    lv_obj_t *screen = ct_screen_new();
-    lv_obj_set_flex_align(screen, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(screen, 16, 0);
-    ct_label(screen, B24, battery_empty ? "电量用完了，已关机" : "已关机");
-    ct_label(screen, F20, battery_empty ? "插上充电线再开机" : "按电源键开机");
-    epd_hint(CT_REFRESH_FULL);
-    lv_screen_load(screen);
+    const int64_t t0 = esp_timer_get_time();
+    epd_hint_clean();
+    ct_ui_show_off(battery_empty);
     lv_refr_now(NULL);
-    if (!epd_wait_idle(5000)) {
+    ESP_LOGI(TAG, "last page rendered in %d ms", (int)((esp_timer_get_time() - t0) / 1000));
+    if (epd_finish(9000)) {
+        ESP_LOGI(TAG, "last page drawn in %d ms", (int)((esp_timer_get_time() - t0) / 1000));
+    } else {
         ESP_LOGW(TAG, "panel still busy; switching off anyway");
     }
+    vTaskDelay(pdMS_TO_TICKS(300)); /* lets the log above reach the computer */
     if (battery_empty) {
         charger_battery_off();
     }

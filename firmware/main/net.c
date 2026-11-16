@@ -23,6 +23,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
+#include "freertos/ringbuf.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
 #include "nvs.h"
@@ -436,6 +438,92 @@ static void diag_tick(int sock, int64_t now) {
     next_send = now + DIAG_MS;
 }
 
+/* ---------- log over the network ---------- */
+
+/* Every log line also goes, as UDP {"t":"log","s":"..."}, to the discovery port of
+ * every connected computer; `codetalky --device-log` prints them. For debugging
+ * without the USB cable (power off, light sleep). Lines are queued without waiting
+ * and dropped if the queue is full. */
+#define LOG_LINE_MAX 200
+
+static RingbufHandle_t s_log_ring;
+static SemaphoreHandle_t s_log_lock; /* guards the format buffer */
+static vprintf_like_t s_log_console;
+
+static int log_hook(const char *fmt, va_list args) {
+    va_list copy;
+    va_copy(copy, args);
+    const int n = s_log_console(fmt, args);
+    if (xSemaphoreTake(s_log_lock, 0) == pdTRUE) {
+        static char line[LOG_LINE_MAX];
+        int len = vsnprintf(line, sizeof(line), fmt, copy);
+        if (len > 0) {
+            if (len >= (int)sizeof(line)) len = sizeof(line) - 1;
+            xRingbufferSend(s_log_ring, line, (size_t)len, 0);
+        }
+        xSemaphoreGive(s_log_lock);
+    }
+    va_end(copy);
+    return n;
+}
+
+static void log_task(void *arg) {
+    (void)arg;
+    int sock = -1;
+    char msg[LOG_LINE_MAX * 2 + 24];
+    for (;;) {
+        /* Hold the lines (up to the ring's size) until a computer is connected, so the
+         * boot log arrives too. */
+        bool any_up = false;
+        for (int i = 0; i < CT_MAX_LINKS; i++) {
+            any_up |= s_links[i].used && s_links[i].up;
+        }
+        if (!any_up) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+        size_t len = 0;
+        char *item = xRingbufferReceive(s_log_ring, &len, pdMS_TO_TICKS(1000));
+        if (item == NULL) {
+            continue;
+        }
+        size_t k = (size_t)snprintf(msg, sizeof(msg), "{\"t\":\"log\",\"s\":\"");
+        for (size_t i = 0; i < len && k < sizeof(msg) - 4; i++) {
+            const char c = item[i];
+            if (c == '"' || c == '\\') {
+                msg[k++] = '\\';
+                msg[k++] = c;
+            } else if ((unsigned char)c >= 0x20) {
+                msg[k++] = c;
+            } /* newlines and colour codes' ESC are dropped */
+        }
+        vRingbufferReturnItem(s_log_ring, item);
+        msg[k++] = '"';
+        msg[k++] = '}';
+        for (int i = 0; i < CT_MAX_LINKS; i++) {
+            if (!s_links[i].used || !s_links[i].up) {
+                continue;
+            }
+            if (sock < 0) {
+                sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+                if (sock < 0) break;
+            }
+            sendto(sock, msg, k, 0, (struct sockaddr *)&s_links[i].addr, sizeof(s_links[i].addr));
+        }
+    }
+}
+
+static void log_start(void) {
+    s_log_ring = xRingbufferCreate(8192, RINGBUF_TYPE_NOSPLIT);
+    s_log_lock = xSemaphoreCreateMutex();
+    if (s_log_ring == NULL || s_log_lock == NULL) {
+        return;
+    }
+    xTaskCreatePinnedToCore(log_task, "netlog", 4096, NULL, 2, NULL, 0);
+    s_log_console = vprintf; /* until the swap below returns the real one */
+    s_log_console = esp_log_set_vprintf(log_hook);
+}
+
 static void net_task(void *arg) {
     (void)arg;
     int sock = -1;
@@ -492,5 +580,7 @@ void net_init(void) {
         ESP_LOGI(TAG, "%d saved Wi-Fi network(s), first \"%s\"", s_network_count, s_networks[0].ssid);
     }
     wifi_start();
+    log_start(); /* after wifi_start(): its sockets need the network stack (a first
+                  * build started it before and crashed at boot, 2026-11-16) */
     xTaskCreatePinnedToCore(net_task, "net", 6144, NULL, 4, NULL, 0);
 }

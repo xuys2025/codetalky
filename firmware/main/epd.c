@@ -13,11 +13,10 @@
  *    waveform lightens the black edge pixels of glyphs to light or dark grey.
  *
  * The task keeps the level each pixel physically shows (s_phys) and refreshes only
- * what differs from the target. Pixels already grey must not be driven again by a
- * later partial refresh: the partial waveform gives black->black pixels a short
- * "keep black" pulse that would darken them back. So during partial refreshes every
- * grey pixel that stays as it is goes to the panel as white->white, which the
- * waveform leaves alone.
+ * what differs from the target. A partial refresh drives only the pixels that
+ * change; every other pixel goes to the panel as white->white, which the waveform
+ * leaves alone. (Its black->black "keep black" pulse would darken grey pixels back,
+ * and on static black it built up charge that brought old screens back as ghosts.)
  *
  * Panel plane bits: 1 = white. The partial waveform is indexed by (old, new):
  * B->B keep-black pulse, B->W drive white, W->B drive black, W->W nothing. The grey
@@ -53,8 +52,6 @@ static uint8_t *s_target; /* grey level per UI pixel, what LVGL wants shown */
 static uint8_t *s_phys;   /* grey level per UI pixel, what the panel physically shows */
 /* Panel planes (landscape, 1 bit per pixel): */
 static uint8_t *s_plane; /* black-and-white image of the target */
-static uint8_t *s_shown; /* black-and-white image of what the panel shows, grey pixels as black */
-static uint8_t *s_grey;  /* 1 = pixel physically grey */
 static uint8_t *s_ram_a; /* scratch: what goes to the controller's two RAM planes */
 static uint8_t *s_ram_b;
 static SemaphoreHandle_t s_lock;
@@ -67,9 +64,12 @@ static EventGroupHandle_t s_state;
 static rect_t s_dirty = {0, 0, -1, -1};
 static ct_refresh_t s_pending = CT_REFRESH_PARTIAL;
 static bool s_have_frame;
+static bool s_clean;  /* wipe the panel black and white before the pending full refresh */
+static bool s_off; /* epd_finish() ran: the panel is asleep, draw nothing more */
 
-/* Only the UI task touches this. The first frame is a clean full refresh. */
+/* Only the UI task touches these. The first frame is a clean full refresh. */
 static ct_refresh_t s_hint = CT_REFRESH_FULL;
+static bool s_clean_hint;
 
 static const char *const MODE_NAMES[] = {"partial", "fast", "full"};
 
@@ -77,6 +77,11 @@ void epd_hint(ct_refresh_t mode) {
     if (mode > s_hint) {
         s_hint = mode;
     }
+}
+
+void epd_hint_clean(void) {
+    s_clean_hint = true;
+    s_hint = CT_REFRESH_FULL;
 }
 
 static void rect_add(rect_t *r, int x1, int y1, int x2, int y2) {
@@ -101,18 +106,22 @@ static inline uint8_t bw_of(uint8_t level) {
 
 /* RGB565 -> the level the pixel is shown at: 0 black, 1 dark grey, 2 light grey,
  * 3 white. Luminance weights as in sim.js. The UI is black and white; grey only
- * appears on glyph edges, and on the real panel text read better one step darker
- * than the simulator's mapping (2026-11-16): edges that render light grey are shown
- * dark grey, darker ones black. TEXT_WEIGHT 0 restores the simulator's mapping. */
-#define TEXT_WEIGHT 1
+ * appears on glyph edges, and on the real panel text read better leaning towards
+ * its ink (2026-11-16): an edge pixel at least half covered is ink, a fainter one
+ * the grey next to the ink. For black text that is dark grey; for white text on
+ * the UI's tinted black (CT_INK_BG, blue > red marks it) the mirror image, light
+ * grey, so white text is as bold as black text. */
+#define LUM_MAX (31 * 247 + 63 * 239 + 31 * 90)
+#define LUM_INK (LUM_MAX / 2)              /* at least half ink */
+#define LUM_EDGE (LUM_MAX - LUM_MAX / 6)   /* at least a sixth ink */
 
 static inline uint8_t level_of(uint16_t c) {
-    const int lum = ((c >> 11) & 0x1f) * 247 + ((c >> 5) & 0x3f) * 239 + (c & 0x1f) * 90;
-#if TEXT_WEIGHT
-    return lum >= 21300 ? 3 : lum >= 12800 ? 1 : 0;
-#else
-    return lum >= 21300 ? 3 : lum >= 12800 ? 2 : lum >= 4300 ? 1 : 0;
-#endif
+    const int r = (c >> 11) & 0x1f, g = (c >> 5) & 0x3f, b = c & 0x1f;
+    const int lum = r * 247 + g * 239 + b * 90;
+    if (b > r) { /* white ink */
+        return lum >= LUM_MAX - LUM_INK ? 3 : lum >= LUM_MAX - LUM_EDGE ? 2 : 0;
+    }
+    return lum >= LUM_EDGE ? 3 : lum >= LUM_INK ? 1 : 0;
 }
 
 /* UI (x, y), portrait -> panel byte and bit, landscape: px = y, py = 479 - x. */
@@ -156,12 +165,15 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
             s_pending = s_hint;
         }
         s_have_frame = true;
+        s_clean |= s_clean_hint;
+        /* Under the lock, so the task cannot mark itself idle with this frame pending. */
+        xEventGroupClearBits(s_state, EPD_IDLE);
     }
     xSemaphoreGive(s_lock);
 
     if (last) {
         s_hint = CT_REFRESH_PARTIAL;
-        xEventGroupClearBits(s_state, EPD_IDLE);
+        s_clean_hint = false;
         xTaskNotifyGive(s_task);
     }
     lv_display_flush_ready(disp);
@@ -176,7 +188,14 @@ typedef struct {
  * Fills s_ram_a (new, 0x24) and s_ram_b (old, 0x26). Called with s_lock held. */
 static frame_t prepare_partial(const rect_t *r) {
     frame_t f = {0};
-    memcpy(s_ram_b, s_shown, SSD1677_PLANE_BYTES);
+    /* Only pixels that change colour are driven; all others go to the panel as
+     * white->white, which the waveform leaves alone. The vendor's partial waveform
+     * gives every black->black pixel a short black pulse, one way only: static black
+     * (the status bar, text that stays) took it on every refresh, charge built up in
+     * the panel and pulled old screens back a few seconds after a full wipe
+     * (2026-11-16). */
+    memset(s_ram_a, 0xFF, SSD1677_PLANE_BYTES);
+    memset(s_ram_b, 0xFF, SSD1677_PLANE_BYTES);
     for (int y = r->y1; y <= r->y2; y++) {
         const uint8_t bit = panel_bit(y);
         for (int x = r->x1; x <= r->x2; x++) {
@@ -189,14 +208,13 @@ static frame_t prepare_partial(const rect_t *r) {
                 continue;
             }
             f.changed++;
-            if (is_grey(p)) {
-                /* It shows grey but its "old" bit says black: if it must become black
-                 * (or another grey, which starts from black), say it was white so the
-                 * waveform really drives it. */
-                put_bit(s_grey, byte, bit, false);
-                if (bw_of(t) == 0) {
-                    put_bit(s_ram_b, byte, bit, true);
-                }
+            const bool new_white = bw_of(t) == 3;
+            /* A grey pixel sits between black and white: drive it as if it were the
+             * opposite of where it goes (black and other greys start from black). */
+            const bool old_white = is_grey(p) ? !new_white : bw_of(p) == 3;
+            if (old_white != new_white) {
+                put_bit(s_ram_b, byte, bit, old_white);
+                put_bit(s_ram_a, byte, bit, new_white);
             }
             s_phys[i] = bw_of(t);
             if (is_grey(t)) {
@@ -204,18 +222,12 @@ static frame_t prepare_partial(const rect_t *r) {
             }
         }
     }
-    /* Grey pixels that stay grey go as white->white: untouched by the waveform. */
-    for (int k = 0; k < SSD1677_PLANE_BYTES; k++) {
-        s_ram_a[k] = s_plane[k] | s_grey[k];
-        s_ram_b[k] |= s_grey[k];
-    }
     return f;
 }
 
 /* Full-screen refresh: every pixel is driven to black or white. Called with s_lock held. */
 static frame_t prepare_full(void) {
     frame_t f = {0};
-    memset(s_grey, 0, SSD1677_PLANE_BYTES);
     for (int y = 0; y < H; y++) {
         const uint8_t bit = panel_bit(y);
         for (int x = 0; x < W; x++) {
@@ -241,7 +253,7 @@ static bool planes_differ(const uint8_t *a, const uint8_t *b) {
 /* Black-and-white pass for the pending frame. Returns true if grey is owed. */
 static bool show_frame(unsigned *partials) {
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    if (!s_have_frame) {
+    if (!s_have_frame || s_off) {
         xSemaphoreGive(s_lock);
         return false;
     }
@@ -250,6 +262,8 @@ static bool show_frame(unsigned *partials) {
     s_dirty = (rect_t){0, 0, -1, -1};
     s_pending = CT_REFRESH_PARTIAL;
     s_have_frame = false;
+    const bool clean = s_clean && mode == CT_REFRESH_FULL;
+    s_clean = false;
     frame_t f = {0};
     esp_pm_lock_acquire(s_busy);
     if (mode != CT_REFRESH_PARTIAL) {
@@ -263,19 +277,36 @@ static bool show_frame(unsigned *partials) {
     const bool drive = mode == CT_REFRESH_FULL || (mode == CT_REFRESH_FAST && f.changed > 0) ||
                        (mode == CT_REFRESH_PARTIAL && planes_differ(s_ram_a, s_ram_b));
     if (!drive) {
-        memcpy(s_shown, s_plane, SSD1677_PLANE_BYTES);
         return f.grey_owed;
     }
 
     const int64_t t0 = esp_timer_get_time();
     int busy_ms = 0;
     esp_err_t err;
+    if (mode != CT_REFRESH_PARTIAL) {
+        ESP_LOGI(TAG, "%s refresh starting", MODE_NAMES[mode]);
+    }
     if (mode == CT_REFRESH_PARTIAL) {
         err = ssd1677_load(s_ram_a, s_ram_b);
         if (err == ESP_OK) err = ssd1677_refresh(SSD1677_PARTIAL, &busy_ms);
         (*partials)++;
     } else {
-        err = ssd1677_load(s_plane, s_plane);
+        /* The panel's own full waveform runs properly only from a freshly reset
+         * controller. Once one of ours had been loaded, it ran for 286 ms instead of
+         * 1021 and merely faded the old image: the "switched off" page never
+         * appeared (2026-11-16). The reset clears the controller's RAM, so it goes
+         * before the planes are loaded. */
+        err = mode == CT_REFRESH_FULL ? ssd1677_init() : ESP_OK;
+        /* A wipe first: one full refresh left faint ghosts of the screen before
+         * (2026-11-16); all black, then all white, clears them. */
+        for (int pass = 0; clean && err == ESP_OK && pass < 2; pass++) {
+            memset(s_ram_a, pass == 0 ? 0x00 : 0xFF, SSD1677_PLANE_BYTES);
+            err = ssd1677_load(s_ram_a, s_ram_a);
+            if (err == ESP_OK) err = ssd1677_refresh(SSD1677_FULL, &busy_ms);
+            if (err == ESP_OK) err = ssd1677_init();
+            ESP_LOGI(TAG, "wipe to %s: busy %d ms", pass == 0 ? "black" : "white", busy_ms);
+        }
+        if (err == ESP_OK) err = ssd1677_load(s_plane, s_plane);
         if (err == ESP_OK) {
             err = ssd1677_refresh(mode == CT_REFRESH_FULL ? SSD1677_FULL : SSD1677_FULL_FAST, &busy_ms);
         }
@@ -293,7 +324,6 @@ static bool show_frame(unsigned *partials) {
         xTaskNotifyGive(s_task);
         return false;
     }
-    memcpy(s_shown, s_plane, SSD1677_PLANE_BYTES);
     if (mode == CT_REFRESH_PARTIAL) {
         ESP_LOGI(TAG, "partial: ui %dx%d at (%d,%d), %d px changed, busy %d ms, total %d ms, %u partials",
                  r.x2 - r.x1 + 1, r.y2 - r.y1 + 1, r.x1, r.y1, f.changed, busy_ms,
@@ -305,14 +335,19 @@ static bool show_frame(unsigned *partials) {
     return f.grey_owed;
 }
 
-/* Grey pass: lighten the black base of every pixel that should be grey. */
-static void overlay(void) {
+/* Grey pass: lighten the black base of every pixel that should be grey. Returns
+ * true if it did not run and the grey is still owed. */
+static bool overlay(void) {
     int light = 0, dark = 0;
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    if (s_have_frame) {
-        /* A new frame came in: its black-and-white pass goes first. */
+    if (s_off) {
         xSemaphoreGive(s_lock);
-        return;
+        return false;
+    }
+    if (s_have_frame) {
+        /* A new frame came in: its black-and-white pass goes first, then this. */
+        xSemaphoreGive(s_lock);
+        return true;
     }
     esp_pm_lock_acquire(s_busy);
     memset(s_ram_a, 0, SSD1677_PLANE_BYTES); /* 0x24: dark grey */
@@ -333,14 +368,13 @@ static void overlay(void) {
             } else {
                 light++;
             }
-            s_grey[byte] |= bit;
             s_phys[i] = t;
         }
     }
     esp_pm_lock_release(s_busy);
     xSemaphoreGive(s_lock);
     if (light + dark == 0) {
-        return;
+        return false;
     }
     const int64_t t0 = esp_timer_get_time();
     int busy_ms = 0;
@@ -348,10 +382,11 @@ static void overlay(void) {
     if (err == ESP_OK) err = ssd1677_refresh(SSD1677_GREY, &busy_ms);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "grey pass failed: %s", esp_err_to_name(err));
-        return;
+        return false;
     }
     ESP_LOGI(TAG, "grey: %d light + %d dark px, busy %d ms, total %d ms", light, dark, busy_ms,
              (int)((esp_timer_get_time() - t0) / 1000));
+    return false;
 }
 
 static void refresh_task(void *arg) {
@@ -360,15 +395,22 @@ static void refresh_task(void *arg) {
     bool grey_owed = false;
     for (;;) {
         if (!grey_owed) {
-            xEventGroupSetBits(s_state, EPD_IDLE);
+            /* Idle only if no frame came in while the last refresh ran (flush_cb
+             * clears the bit under the same lock). Setting it regardless let
+             * epd_wait_idle() return with the "switched off" page still queued, and
+             * the power went while it was being drawn (2026-11-16). */
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            if (!s_have_frame) {
+                xEventGroupSetBits(s_state, EPD_IDLE);
+            }
+            xSemaphoreGive(s_lock);
         }
         const TickType_t wait = grey_owed ? pdMS_TO_TICKS(OVERLAY_DELAY_MS) : portMAX_DELAY;
         if (ulTaskNotifyTake(pdTRUE, wait) > 0) {
             grey_owed |= show_frame(&partials);
         } else if (grey_owed) {
             /* The screen has been still for a moment. */
-            grey_owed = false;
-            overlay();
+            grey_owed = overlay();
         }
     }
 }
@@ -377,26 +419,35 @@ bool epd_wait_idle(uint32_t timeout_ms) {
     return (xEventGroupWaitBits(s_state, EPD_IDLE, pdFALSE, pdTRUE, pdMS_TO_TICKS(timeout_ms)) & EPD_IDLE) != 0;
 }
 
+bool epd_finish(uint32_t timeout_ms) {
+    const bool idle = epd_wait_idle(timeout_ms);
+    /* Keep the refresh task away from the panel from here on. */
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_off = true;
+    xSemaphoreGive(s_lock);
+    if (idle) {
+        ssd1677_sleep();
+    }
+    return idle;
+}
+
 lv_display_t *epd_init(void) {
     const size_t fb_bytes = (size_t)W * H * sizeof(uint16_t);
     s_fb = heap_caps_malloc(fb_bytes, MALLOC_CAP_SPIRAM);
     s_target = heap_caps_calloc(1, (size_t)W * H, MALLOC_CAP_SPIRAM);
     s_phys = heap_caps_calloc(1, (size_t)W * H, MALLOC_CAP_SPIRAM);
     s_plane = heap_caps_malloc(SSD1677_PLANE_BYTES, MALLOC_CAP_SPIRAM);
-    s_shown = heap_caps_malloc(SSD1677_PLANE_BYTES, MALLOC_CAP_SPIRAM);
-    s_grey = heap_caps_calloc(1, SSD1677_PLANE_BYTES, MALLOC_CAP_SPIRAM);
     s_ram_a = heap_caps_malloc(SSD1677_PLANE_BYTES, MALLOC_CAP_SPIRAM);
     s_ram_b = heap_caps_malloc(SSD1677_PLANE_BYTES, MALLOC_CAP_SPIRAM);
     s_lock = xSemaphoreCreateMutex();
     esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "epd", &s_busy);
     s_state = xEventGroupCreate();
-    if (s_fb == NULL || s_target == NULL || s_phys == NULL || s_plane == NULL || s_shown == NULL || s_grey == NULL ||
+    if (s_fb == NULL || s_target == NULL || s_phys == NULL || s_plane == NULL ||
         s_ram_a == NULL || s_ram_b == NULL || s_lock == NULL) {
         ESP_LOGE(TAG, "out of memory");
         abort();
     }
     memset(s_plane, 0xFF, SSD1677_PLANE_BYTES);
-    memset(s_shown, 0xFF, SSD1677_PLANE_BYTES);
     ESP_ERROR_CHECK(ssd1677_init());
 
     xTaskCreatePinnedToCore(refresh_task, "epd", 4096, NULL, 4, &s_task, 0);

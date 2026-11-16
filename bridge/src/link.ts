@@ -277,7 +277,12 @@ export class DeviceLink {
     for (const snapshot of this.hub.list()) this.send({ t: 'session', s: this.prepare(snapshot) });
     this.send({ t: 'ready' });
     this.detach ??= this.hub.attachDevice();
-    this.stopFirmware ??= this.options.firmware?.subscribe((image) => this.offerFirmware(image)) ?? null;
+    const store = this.options.firmware;
+    if (store && this.stopFirmware === null) {
+      this.stopFirmware = store.subscribe((image) => this.offerFirmware(image));
+      const pending = this.deviceId === null ? null : store.pendingFor(this.deviceId);
+      if (pending) this.offerFirmware(pending);
+    }
     this.unsubscribe ??= this.hub.subscribe((event) => {
       if (event.type === 'devices') return;
       this.dirty.add(event.id);
@@ -293,6 +298,7 @@ export class DeviceLink {
       this.options.log?.(`device "${this.device}" already runs firmware ${image.version}`);
       return false;
     }
+    if (this.deviceId !== null) this.options.firmware?.markTold(this.deviceId);
     this.send({ t: 'update', path: image.path, size: image.data.length, sha256: image.sha256, version: image.version });
     this.options.log?.(`offered firmware ${image.version} to device "${this.device}" (runs ${this.firmware})`);
     return true;

@@ -37,6 +37,11 @@ void ct_ui_on_link(int link, bool up);
 /* One text frame from a bridge. Call from the UI thread, not from inside LVGL. */
 void ct_ui_on_message(int link, const char *json, size_t len);
 
+/* The last screen before the device switches off (e-ink keeps showing it): the
+ * logo, how to switch on again, and the battery level and time. Loads it with a
+ * full-refresh hint; the platform then draws it and cuts the power. */
+void ct_ui_show_off(bool battery_empty);
+
 #ifdef __cplusplus
 }
 #endif

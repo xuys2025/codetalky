@@ -9,6 +9,12 @@
 #define CT_H 800
 #define CT_PAD 14
 
+/* The black behind white text. It shows as plain black, but its touch of blue marks
+ * the anti-aliased edges of white text: the e-ink driver shows those leaning white
+ * (as edges of black text lean black), so white text is as bold as black text
+ * (firmware/main/epd.c level_of(), simulator/web/sim.js levelsOf()). */
+#define CT_INK_BG lv_color_make(0, 0, 0x40)
+
 #define F18 (&ct_font_text_18)
 #define F20 (&ct_font_text_20)
 #define B20 (&ct_font_bold_20)

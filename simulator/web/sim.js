@@ -63,6 +63,10 @@ function unionOf(rects) {
 const widthOf = (r) => r.x2 - r.x1 + 1;
 const heightOf = (r) => r.y2 - r.y1 + 1;
 
+const LUM_MAX = 31 * 2.47 + 63 * 2.39 + 31 * 0.9;
+const LUM_INK = LUM_MAX / 2;
+const LUM_EDGE = LUM_MAX - LUM_MAX / 6;
+
 // Grey level per pixel of the framebuffer inside rect: 0 black, 1 dark, 2 light, 3 white.
 // Only 3 is white in the black-and-white pass; the grey pass lightens 1 and 2.
 function levelsOf(rect) {
@@ -75,10 +79,17 @@ function levelsOf(rect) {
     let j = base + ((rect.y1 + y) * W + rect.x1) * 2;
     for (let x = 0; x < w; x++, j += 2) {
       const c = heap[j] | (heap[j + 1] << 8);
-      const lum = ((c >> 11) & 0x1f) * 2.47 + ((c >> 5) & 0x3f) * 2.39 + (c & 0x1f) * 0.9;
-      // As the firmware (TEXT_WEIGHT 1 in firmware/main/epd.c): text read better one
-      // step darker on the real panel, so light edges show dark grey, darker ones black.
-      out[y * w + x] = lum >= 213 ? 3 : lum >= 128 ? 1 : 0;
+      const r = (c >> 11) & 0x1f;
+      const b = c & 0x1f;
+      const lum = r * 2.47 + ((c >> 5) & 0x3f) * 2.39 + b * 0.9;
+      // As the firmware (level_of() in firmware/main/epd.c): glyph edges lean towards
+      // the ink. At least half ink is ink, at least a sixth is the grey next to it:
+      // dark grey for black text, light grey for white text on the UI's tinted black
+      // (CT_INK_BG; blue above red marks it).
+      out[y * w + x] =
+        b > r
+          ? lum >= LUM_MAX - LUM_INK ? 3 : lum >= LUM_MAX - LUM_EDGE ? 2 : 0
+          : lum >= LUM_EDGE ? 3 : lum >= LUM_INK ? 1 : 0;
     }
   }
   return out;

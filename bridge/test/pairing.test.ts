@@ -463,6 +463,31 @@ test('new firmware is offered only to paired devices that can update, over their
   assert.ok(!old.kinds().includes('update'));
 });
 
+test('a device that was off when firmware was sent gets it once when it connects', () => {
+  const { clock, pairing } = setup();
+  const hub = new Hub(clock);
+  const store = new FirmwareStore();
+  pairing.open();
+  const d = new FakeDevice(hub, clock, pairing, null, DEVICE, { fw: 'v1', firmware: store });
+  d.hello();
+  pairing.approve(d.code);
+  d.link.close();
+  assert.equal(store.offer(image('v2')), 0, 'nobody is connected');
+
+  const back = new FakeDevice(hub, clock, pairing, d.key, DEVICE, { fw: 'v1', firmware: store });
+  back.hello();
+  assert.equal(back.got.at(-1)!.t, 'update', 'offered on connecting');
+  assert.equal(back.got.filter((m) => m.t === 'update').length, 1);
+  back.link.close();
+
+  // Back on v1 again (the install failed or rolled back): not offered a second time.
+  const again = new FakeDevice(hub, clock, pairing, d.key, DEVICE, { fw: 'v1', firmware: store });
+  again.hello();
+  assert.ok(!again.kinds().includes('update'));
+  // A new `codetalky firmware` offers again.
+  assert.equal(store.offer(image('v3')), 1);
+});
+
 test('a device that connects again and proves itself replaces its old, likely dead, connection', () => {
   const { clock, pairing } = setup();
   const hub = new Hub(clock);

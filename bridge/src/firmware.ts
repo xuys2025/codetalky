@@ -51,6 +51,8 @@ export class FirmwareStore {
   private current: FirmwareImage | null = null;
   /** Each returns true if it told its device. */
   private readonly listeners = new Set<(image: FirmwareImage) => boolean>();
+  /** Devices (by id) already told about the current image. */
+  private readonly told = new Set<string>();
 
   get image(): FirmwareImage | null {
     return this.current;
@@ -59,11 +61,24 @@ export class FirmwareStore {
   /** Offer an image to every listening device. Returns how many were told. */
   offer(image: FirmwareImage): number {
     this.current = image;
+    this.told.clear();
     let told = 0;
     for (const listener of this.listeners) {
       if (listener(image)) told++;
     }
     return told;
+  }
+
+  /** The image on offer if this device has not been told about it yet. A device that
+   * connects after `codetalky firmware` (it was off) gets it once; only once, so a
+   * build that fails to install or rolls back is not offered over and over. */
+  pendingFor(deviceId: string): FirmwareImage | null {
+    return this.current && !this.told.has(deviceId) ? this.current : null;
+  }
+
+  /** Record that a device was told about the current image. */
+  markTold(deviceId: string): void {
+    this.told.add(deviceId);
   }
 
   /** Bytes for GET path, or null. Only the image on offer is served. */
