@@ -11,6 +11,7 @@
 #define NET_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 void net_init(void);
 
@@ -19,5 +20,8 @@ bool net_send(int link, const char *json);
 
 /* Drop a link's connection now; it reconnects a little later. Any task. */
 void net_close(int link);
+
+/* http://<that computer>:<port><path>, for downloads from a link's bridge. */
+bool net_link_url(int link, const char *path, char *buf, size_t size);
 
 #endif /* NET_H */

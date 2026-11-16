@@ -20,6 +20,7 @@
 #include "lvgl.h"
 #include "net.h"
 #include "nvs_flash.h"
+#include "ota.h"
 
 static const char *TAG = "main";
 static QueueHandle_t s_queue;
@@ -64,6 +65,9 @@ static void handle(app_event_t *ev) {
         ct_ui_on_key((ct_key_t)ev->a, ev->b != 0);
         break;
     case APP_EV_LINK:
+        if (ev->b != 0) {
+            ota_confirm(); /* a new build that reaches a computer is kept */
+        }
         ct_ui_on_link(ev->a, ev->b != 0);
         break;
     case APP_EV_MSG:
@@ -72,6 +76,9 @@ static void handle(app_event_t *ev) {
         break;
     case APP_EV_POWER_OFF:
         power_off(ev->a == 1);
+        break;
+    case APP_EV_UPDATE:
+        ota_run();
         break;
     }
 }
@@ -84,7 +91,7 @@ static void ui_task(void *arg) {
     input_init();
     ct_ui_init();
     net_init();
-    ESP_LOGI(TAG, "UI up; free internal %u KB, PSRAM %u KB",
+    ESP_LOGI(TAG, "UI up, firmware %s; free internal %u KB, PSRAM %u KB", ota_version(),
              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
 
@@ -121,6 +128,7 @@ void app_main(void) {
         ESP_LOGW(TAG, "power management: %s", esp_err_to_name(err));
     }
     esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "ui", &s_busy);
+    ota_boot();
     board_init();
     s_queue = xQueueCreate(64, sizeof(app_event_t));
     xTaskCreatePinnedToCore(ui_task, "ui", 16 * 1024, NULL, 3, NULL, 1);

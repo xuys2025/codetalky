@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { ManualClock } from '../src/clock.ts';
+import { FirmwareStore, type FirmwareImage } from '../src/firmware.ts';
 import { Hub } from '../src/hub.ts';
 import { DeviceLink, HANDSHAKE_MS } from '../src/link.ts';
 import { MAX_PENDING, Pairing, WINDOW_MS, WINDOW_REVEALS } from '../src/pairing.ts';
@@ -96,8 +97,10 @@ test('the device messages for auth and pairing are checked', () => {
     proto: 1,
     device: 'd',
     deviceId: DEVICE,
+    fw: null,
   });
   assert.equal((parseFromDevice('{"t":"hello","proto":1,"device":"d","deviceId":"NOPE"}') as { deviceId: unknown }).deviceId, null);
+  assert.equal((parseFromDevice('{"t":"hello","proto":1,"device":"d","fw":"2ebb56c-1117"}') as { fw: unknown }).fw, '2ebb56c-1117');
 });
 
 function session(id: string): SessionSnapshot {
@@ -143,9 +146,19 @@ class FakeDevice {
   readonly id: string;
   dropped = false;
 
-  constructor(hub: Hub, clock: ManualClock, pairing: Pairing, key: Buffer | null = null, id = DEVICE) {
+  private readonly fw: string | undefined;
+
+  constructor(
+    hub: Hub,
+    clock: ManualClock,
+    pairing: Pairing,
+    key: Buffer | null = null,
+    id = DEVICE,
+    more: { fw?: string; firmware?: FirmwareStore; connected?: Map<string, DeviceLink> } = {},
+  ) {
     this.key = key;
     this.id = id;
+    this.fw = more.fw;
     this.link = new DeviceLink(hub, clock, (frame) => this.receive(frame), {
       hostName: '台式机',
       hostId: HOST,
@@ -154,11 +167,13 @@ class FakeDevice {
       flushMs: 10,
       pairing,
       drop: () => (this.dropped = true),
+      firmware: more.firmware,
+      connected: more.connected,
     });
   }
 
   hello(): boolean {
-    return this.send({ t: 'hello', proto: 1, device: '墨水屏', deviceId: this.id });
+    return this.send({ t: 'hello', proto: 1, device: '墨水屏', deviceId: this.id, ...(this.fw ? { fw: this.fw } : {}) });
   }
 
   send(msg: Msg): boolean {
@@ -414,4 +429,63 @@ test('a pairing exchange is used once: asking again needs a new hello', () => {
   assert.equal(pairing.pending().length, 1);
   if (first !== d.code) assert.equal(pairing.approve(first), null);
   assert.ok(pairing.approve(d.code));
+});
+
+function image(version: string): FirmwareImage {
+  return { data: Buffer.alloc(1000, 1), sha256: 'ab'.repeat(32), version, path: `/firmware/${'ab'.repeat(32)}.bin` };
+}
+
+test('new firmware is offered only to paired devices that can update, over their encrypted link', () => {
+  const { clock, pairing } = setup();
+  const hub = new Hub(clock);
+  const store = new FirmwareStore();
+  pairing.open();
+  const d = new FakeDevice(hub, clock, pairing, null, DEVICE, { fw: 'v1', firmware: store });
+  d.hello();
+  // Before pairing completes, nothing is offered.
+  assert.equal(store.offer(image('v2')), 0);
+  pairing.approve(d.code);
+  assert.equal(d.link.firmware, 'v1');
+
+  assert.equal(store.offer(image('v2')), 1);
+  const update = d.got.at(-1)!;
+  assert.deepEqual(update, { t: 'update', path: image('v2').path, size: 1000, sha256: 'ab'.repeat(32), version: 'v2' });
+  // It already runs this one: not offered again.
+  assert.equal(store.offer(image('v1')), 0);
+  d.link.close();
+  assert.equal(store.offer(image('v3')), 0, 'a closed link hears nothing');
+
+  // A device that does not say which firmware it runs cannot update itself.
+  const old = new FakeDevice(hub, clock, pairing, d.key, DEVICE, { firmware: store });
+  old.hello();
+  assert.deepEqual(old.kinds(), ['auth', 'hello', 'ready']);
+  assert.equal(store.offer(image('v4')), 0);
+  assert.ok(!old.kinds().includes('update'));
+});
+
+test('a device that connects again and proves itself replaces its old, likely dead, connection', () => {
+  const { clock, pairing } = setup();
+  const hub = new Hub(clock);
+  const store = new FirmwareStore();
+  const connected = new Map<string, DeviceLink>();
+  pairing.open();
+  const first = new FakeDevice(hub, clock, pairing, null, DEVICE, { fw: 'v1', firmware: store, connected });
+  first.hello();
+  pairing.approve(first.code);
+  assert.equal(hub.devices(), 1);
+
+  // It restarted without saying goodbye; the new connection proves itself with the key.
+  const again = new FakeDevice(hub, clock, pairing, first.key, DEVICE, { fw: 'v2', firmware: store, connected });
+  again.hello();
+  assert.equal(first.dropped, true, 'the old connection is let go');
+  assert.equal(again.dropped, false);
+  assert.equal(hub.devices(), 1, 'counted once');
+  assert.equal(store.offer(image('v3')), 1, 'only the live connection hears about firmware');
+  assert.equal(again.got.at(-1)!.t, 'update');
+
+  // Someone who only knows the device id can't push it off: without the key it never gets that far.
+  const stranger = new FakeDevice(hub, clock, pairing, Buffer.alloc(32, 9), DEVICE, { connected });
+  stranger.hello();
+  assert.equal(again.dropped, false);
+  assert.equal(connected.get(DEVICE), again.link);
 });

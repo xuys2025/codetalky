@@ -541,6 +541,28 @@ static void on_hello(int link, const cJSON *msg) {
     ct_model_mark_stale(link);
 }
 
+static bool is_hex(const char *s, size_t len) {
+    if (s == NULL || strlen(s) != len) return false;
+    for (size_t i = 0; i < len; i++) {
+        const char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    }
+    return true;
+}
+
+/* New firmware from this computer: hand it to the platform if it looks sane. */
+static void on_update(int link, const cJSON *msg) {
+    const char *path = raw_string(msg, "path");
+    const char *sha = raw_string(msg, "sha256");
+    const char *version = raw_string(msg, "version");
+    const double size = number(msg, "size", 0);
+    if (path == NULL || strncmp(path, "/firmware/", 10) != 0 || strlen(path) > 100 || strstr(path, "..") != NULL ||
+        !is_hex(sha, 64) || size < 1024 || size > 8 * 1024 * 1024) {
+        return;
+    }
+    ct_hal_firmware_update(link, path, (uint32_t)size, sha, version != NULL ? version : "");
+}
+
 /* One frame's JSON. sealed: it came encrypted. */
 static ct_event_t handle(int link, const char *json, size_t len, bool sealed) {
     ct_event_t ev = {0};
@@ -591,6 +613,9 @@ static ct_event_t handle(int link, const char *json, size_t len, bool sealed) {
     } else if (strcmp(t, "ready") == 0) {
         ct_model_purge_stale(link);
         ev.type = CT_EV_READY;
+    } else if (strcmp(t, "update") == 0) {
+        /* The hash in this message is what makes the plain download safe: encrypted only. */
+        if (sealed) on_update(link, msg);
     } else if (strcmp(t, "ack") == 0) {
         ev.type = CT_EV_ACK;
         ev.seq = (uint32_t)number(msg, "seq", 0);
@@ -657,6 +682,10 @@ static void say_hello(int link) {
         cJSON_AddNumberToObject(hello, "proto", CT_PROTO_VERSION);
         cJSON_AddStringToObject(hello, "device", CT_DEVICE_NAME);
         cJSON_AddStringToObject(hello, "deviceId", device_id());
+        const char *fw = ct_hal_firmware_version();
+        if (fw != NULL) {
+            cJSON_AddStringToObject(hello, "fw", fw);
+        }
         send_json(link, hello);
     }
 }

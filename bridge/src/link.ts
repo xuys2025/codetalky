@@ -4,6 +4,7 @@
 import type { Clock } from './clock.ts';
 import type { Hub } from './hub.ts';
 import { fixStrings } from './glyphs.ts';
+import type { FirmwareImage, FirmwareStore } from './firmware.ts';
 import type { Pairing } from './pairing.ts';
 import { LIMITS, PROTO, parseFromDevice, type SessionSnapshot, type ToDevice } from './protocol.ts';
 import { Channel, commitOf, fromHex, linkKeys, newKeyPair, pairCode, pairKey, proofOf, random, same, sharedSecret, type KeyPair } from './secure.ts';
@@ -37,8 +38,15 @@ export interface LinkOptions {
   pairing?: Pairing;
   /** Where the random bytes for challenges and pairing come from. Only for repeatable screenshots; default: the OS. */
   entropy?: (bytes: number) => Buffer;
-  /** Ends the connection (a network device that took too long to prove itself or pair). */
-  drop?: () => void;
+  /** Ends the connection: a network device that took too long to prove itself or pair
+   * ('handshake'), or one that connected again and proved itself (its old connection,
+   * likely dead after a restart or a Wi-Fi drop: 'superseded'). */
+  drop?: (why: 'handshake' | 'superseded') => void;
+  /** Network devices that proved themselves, by device id: one connection each. */
+  connected?: Map<string, DeviceLink>;
+  /** Firmware offered with `codetalky firmware`; told to devices that can update. */
+  firmware?: FirmwareStore;
+  log?: (line: string) => void;
 }
 
 export const DEFAULT_QUICK = ['继续下一步', '跑一下测试', '提交这些改动', '先停一下，等我回电脑', '撤销刚才的修改'];
@@ -60,6 +68,9 @@ export class DeviceLink {
   /** Set once the device has said hello; nothing is sent before that. */
   device: string | null = null;
   private deviceId: string | null = null;
+  /** Firmware version from the device's hello; null if it can't update over the network. */
+  firmware: string | null = null;
+  private stopFirmware: (() => void) | null = null;
   /** Synced: the device is trusted (this machine) or proved it holds the key, or just paired. */
   private authed = false;
   private cancelPair: (() => void) | null = null;
@@ -88,7 +99,7 @@ export class DeviceLink {
     // A network device has this long to prove itself or finish pairing, then it has to reconnect.
     if (options.pairing && options.drop) {
       this.cancelHandshake = clock.after(HANDSHAKE_MS, () => {
-        if (!this.authed) options.drop!();
+        if (!this.authed) options.drop!('handshake');
       });
     }
   }
@@ -117,6 +128,7 @@ export class DeviceLink {
       if (this.authed) return true; // already through
       this.device = msg.device;
       this.deviceId = msg.deviceId;
+      this.firmware = msg.fw;
       if (!this.options.pairing) {
         this.sync(); // this machine, or in-process: trusted
       } else {
@@ -149,10 +161,14 @@ export class DeviceLink {
   }
 
   close(): void {
+    if (this.deviceId !== null && this.options.connected?.get(this.deviceId) === this) {
+      this.options.connected.delete(this.deviceId);
+    }
     this.closed = true;
     this.cancelHandshake?.();
     this.cancelPair?.();
     this.unsubscribe?.();
+    this.stopFirmware?.();
     this.detach?.();
     this.cancelFlush?.();
     this.cancelFlush = null;
@@ -235,6 +251,19 @@ export class DeviceLink {
 
   private sync(): void {
     this.authed = true;
+    // The same device proving itself again means its old connection is gone (it
+    // restarted, or Wi-Fi dropped without a goodbye): let that one go now rather than
+    // when TCP notices, so nothing waits on or gets sent to it.
+    const registry = this.options.pairing ? this.options.connected : undefined;
+    if (registry && this.deviceId !== null) {
+      const old = registry.get(this.deviceId);
+      registry.set(this.deviceId, this);
+      if (old && old !== this) {
+        this.options.log?.(`device "${this.device}" connected again: dropping its old connection`);
+        old.options.drop?.('superseded');
+        old.close();
+      }
+    }
     this.dirty.clear();
     this.send({
       t: 'hello',
@@ -248,11 +277,25 @@ export class DeviceLink {
     for (const snapshot of this.hub.list()) this.send({ t: 'session', s: this.prepare(snapshot) });
     this.send({ t: 'ready' });
     this.detach ??= this.hub.attachDevice();
+    this.stopFirmware ??= this.options.firmware?.subscribe((image) => this.offerFirmware(image)) ?? null;
     this.unsubscribe ??= this.hub.subscribe((event) => {
       if (event.type === 'devices') return;
       this.dirty.add(event.id);
       this.cancelFlush ??= this.clock.after(this.options.flushMs, () => this.flush());
     });
+  }
+
+  /** Tell the device about new firmware. Only over an encrypted link: the hash in this
+   * message is what makes the plain HTTP download safe. */
+  private offerFirmware(image: FirmwareImage): boolean {
+    if (this.closed || !this.authed || this.channel === null || this.firmware === null) return false;
+    if (image.version === this.firmware) {
+      this.options.log?.(`device "${this.device}" already runs firmware ${image.version}`);
+      return false;
+    }
+    this.send({ t: 'update', path: image.path, size: image.data.length, sha256: image.sha256, version: image.version });
+    this.options.log?.(`offered firmware ${image.version} to device "${this.device}" (runs ${this.firmware})`);
+    return true;
   }
 
   private flush(): void {

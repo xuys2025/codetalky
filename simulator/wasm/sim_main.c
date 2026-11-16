@@ -91,6 +91,20 @@ uint32_t ct_hal_random(void) {
     return js_random();
 }
 
+/* The simulator is rebuilt, not updated over the network. */
+const char *ct_hal_firmware_version(void) {
+    return NULL;
+}
+
+bool ct_hal_firmware_update(int link, const char *path, uint32_t size, const char *sha256, const char *version) {
+    (void)link;
+    (void)path;
+    (void)size;
+    (void)sha256;
+    (void)version;
+    return false;
+}
+
 int ct_hal_battery_percent(void) {
     return 82;
 }

@@ -5,7 +5,7 @@ import { createReadStream, statSync } from 'node:fs';
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { extname, resolve, sep } from 'node:path';
-import { WebSocketServer } from 'ws';
+import { WebSocketServer, type WebSocket } from 'ws';
 
 import type { Clock } from './clock.ts';
 import type { Hub } from './hub.ts';
@@ -180,12 +180,30 @@ function pathOf(req: IncomingMessage): string | null {
   }
 }
 
+/** How often device connections are checked (a dead one goes within two of these). */
+export const HEARTBEAT_MS = 15_000;
+
 /** At most this many devices from the network may be connected and not yet proven or paired. */
 export const MAX_UNPROVEN = 8;
 
 export function startServer(hub: Hub, clock: Clock, options: ServerOptions): Promise<RunningServer> {
   const simRoot = options.simDir === null ? null : resolve(options.simDir);
   const links = new Set<DeviceLink>();
+  const connected = new Map<string, DeviceLink>();
+  // Heartbeat: a device that restarts or loses Wi-Fi leaves its TCP connection open on
+  // this side for minutes. Ping every HEARTBEAT_MS; no pong by the next round, it's gone.
+  const alive = new Map<WebSocket, boolean>();
+  const heartbeat = setInterval(() => {
+    for (const [ws, ok] of alive) {
+      if (!ok) {
+        ws.terminate();
+        continue;
+      }
+      alive.set(ws, false);
+      ws.ping();
+    }
+  }, HEARTBEAT_MS);
+  heartbeat.unref();
   const http: Server = createServer((req, res) => {
     const path = pathOf(req);
     if (path === null) {
@@ -196,6 +214,19 @@ export function startServer(hub: Hub, clock: Clock, options: ServerOptions): Pro
     const post = options.post?.[path];
     if (post && req.method === 'POST') {
       handlePost(post, req, res, options.log);
+      return;
+    }
+    // Firmware on offer: devices on the network download it (they check its hash).
+    if (path.startsWith('/firmware/') && req.method === 'GET') {
+      const image = options.firmware?.serve(path) ?? null;
+      if (image === null) {
+        res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+        res.end('no such firmware');
+        return;
+      }
+      options.log(`device at ${req.socket.remoteAddress ?? '?'} is downloading the firmware`);
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': image.length, 'cache-control': 'no-store' });
+      res.end(image);
       return;
     }
     if (simRoot === null) {
@@ -262,9 +293,12 @@ export function startServer(hub: Hub, clock: Clock, options: ServerOptions): Pro
       const link = new DeviceLink(hub, clock, (text) => ws.send(text), {
         ...options,
         pairing: mustPair ? options.pairing : undefined,
-        drop: () => ws.close(4001, 'handshake timeout'),
+        connected,
+        drop: (why) => (why === 'superseded' ? ws.terminate() : ws.close(4001, 'handshake timeout')),
       });
       links.add(link);
+      alive.set(ws, true);
+      ws.on('pong', () => alive.set(ws, true));
       options.log(`device connected from ${peer}`);
       ws.on('message', (data, isBinary) => {
         if (isBinary) return; // audio frames: phase 3
@@ -272,10 +306,11 @@ export function startServer(hub: Hub, clock: Clock, options: ServerOptions): Pro
         if (!link.receive(data.toString())) {
           ws.close(4000, 'protocol');
         } else if (!known && link.device !== null) {
-          options.log(`device ${peer} is "${link.device}"`);
+          options.log(`device ${peer} is "${link.device}"${link.firmware ? `, firmware ${link.firmware}` : ''}`);
         }
       });
       ws.on('close', () => {
+        alive.delete(ws);
         link.close();
         links.delete(link);
         options.log(`device ${peer} disconnected`);
@@ -292,6 +327,7 @@ export function startServer(hub: Hub, clock: Clock, options: ServerOptions): Pro
         port: (http.address() as AddressInfo).port,
         close: () =>
           new Promise<void>((done) => {
+            clearInterval(heartbeat);
             for (const ws of sockets.clients) ws.terminate();
             sockets.close();
             http.close(() => done());

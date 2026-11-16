@@ -44,6 +44,16 @@ int ct_hal_battery_percent(void);
 bool ct_hal_store_get(const char *key, char *buf, size_t size);
 void ct_hal_store_set(const char *key, const char *value); /* NULL value erases the key */
 
+/* Which firmware build this is (sent in hello as "fw"), or NULL if this platform can't
+ * update itself over the network (the simulator). */
+const char *ct_hal_firmware_version(void);
+
+/* A paired computer offers new firmware (this only ever comes over an encrypted link):
+ * download `path` over HTTP from the computer behind `link`, check it is `size` bytes
+ * with SHA-256 `sha256` (64 hex digits), install it and restart. Returns at once;
+ * false if the platform can't or is already updating. */
+bool ct_hal_firmware_update(int link, const char *path, uint32_t size, const char *sha256, const char *version);
+
 /* 32 random bits. Pairing and connection keys are made from these: they must come
  * from a cryptographic source (esp_random with the radio on; crypto.getRandomValues). */
 uint32_t ct_hal_random(void);

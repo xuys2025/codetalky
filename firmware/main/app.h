@@ -13,6 +13,7 @@ typedef enum {
     APP_EV_LINK, /* a = link, b = 1 up / 0 down */
     APP_EV_MSG,  /* a = link, text/len = one frame (malloc'd; the UI task frees it) */
     APP_EV_POWER_OFF, /* a = 0 the user held the power key, 1 the battery is empty */
+    APP_EV_UPDATE,    /* new firmware was offered: ota_run() */
 } app_ev_type_t;
 
 typedef struct {

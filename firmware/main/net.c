@@ -267,6 +267,17 @@ bool net_send(int link, const char *json) {
     return esp_websocket_client_send_text(s_links[link].ws, json, (int)strlen(json), pdMS_TO_TICKS(2000)) >= 0;
 }
 
+bool net_link_url(int link, const char *path, char *buf, size_t size) {
+    if (link < 0 || link >= CT_MAX_LINKS || !s_links[link].used || strncmp(s_links[link].uri, "ws://", 5) != 0) {
+        return false;
+    }
+    const char *host = s_links[link].uri + 5; /* ip:port/device */
+    const char *slash = strchr(host, '/');
+    const int host_len = slash != NULL ? (int)(slash - host) : (int)strlen(host);
+    const int n = snprintf(buf, size, "http://%.*s%s", host_len, host, path);
+    return n > 0 && (size_t)n < size;
+}
+
 void net_close(int link) {
     if (link >= 0 && link < CT_MAX_LINKS && s_cmds != NULL) {
         xQueueSend(s_cmds, &link, 0);

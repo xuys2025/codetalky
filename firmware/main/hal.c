@@ -11,6 +11,7 @@
 #include "esp_random.h"
 #include "net.h"
 #include "nvs.h"
+#include "ota.h"
 
 static const char *TAG = "hal";
 static const char *NVS_NS = "codetalky";
@@ -33,6 +34,14 @@ void ct_hal_net_close(int link) {
 
 int ct_hal_battery_percent(void) {
     return board_battery_percent();
+}
+
+const char *ct_hal_firmware_version(void) {
+    return ota_version();
+}
+
+bool ct_hal_firmware_update(int link, const char *path, uint32_t size, const char *sha256, const char *version) {
+    return ota_request(link, path, size, sha256, version);
 }
 
 uint32_t ct_hal_random(void) {

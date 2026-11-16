@@ -32,6 +32,8 @@ import { runManaged } from './run.ts';
 import { Runs } from './runs.ts';
 import { startServer, type PostReply } from './server.ts';
 import { startDiscovery } from './discovery.ts';
+import { FirmwareStore, readImage } from './firmware.ts';
+import { resolve as resolvePath } from 'node:path';
 
 const USAGE = `usage: node src/main.ts [--name N] [--fake] [--fake-only IDS] [--speed N] [--hold S]
                         [--host H] [--port P] [--no-sim] [--insecure-lan]
@@ -57,6 +59,8 @@ const USAGE = `usage: node src/main.ts [--name N] [--fake] [--fake-only IDS] [--
   pair CODE       pair the device whose screen shows CODE (pairing must be open)
   devices         list paired devices
   unpair ID       forget a paired device (by id or name)
+  firmware [FILE] send new firmware to the connected devices over the network
+                  (default: firmware/out/codetalky.bin, from firmware/build.sh)
 
   hooks           print hook settings that send Claude Code's events to the bridge
   --codex         the same for Codex (merge into ~/.codex/hooks.json, then trust them with /hooks)
@@ -164,6 +168,11 @@ function main(): void {
     pairingCommand(port, command, rest);
     return;
   }
+  if (command === 'firmware') {
+    if (rest.length > 1) fail(`unexpected ${rest.slice(1).join(' ')}`);
+    firmwareCommand(port, rest[0] ? resolvePath(rest[0]) : DEFAULT_FIRMWARE);
+    return;
+  }
   if (command !== undefined) fail(`unknown command ${command}`);
   const only = args['fake-only'];
   serve({
@@ -191,6 +200,7 @@ function serve(o: ServeOptions): void {
   const agents = scripts.map((script) => new FakeAgent(hub, demoClock, script));
   const simDir = o.sim ? fileURLToPath(new URL('../../simulator/web/', import.meta.url)) : null;
   const glyphs = Glyphs.load();
+  const firmware = new FirmwareStore();
 
   startServer(hub, realClock, {
     host: o.host,
@@ -200,7 +210,9 @@ function serve(o: ServeOptions): void {
       '/hooks/claude': (body, headers, gone) => claude.handle(body, headers, gone),
       '/hooks/codex': (body, headers, gone) => codex.handle(body, headers, gone),
       '/pairing': (body) => Promise.resolve(pairingControl(pairing, body)),
+      '/firmware': (body) => Promise.resolve(firmwareControl(firmware, body, log)),
     },
+    firmware,
     runs,
     allowRemoteDevices: o.insecureLan,
     pairing,
@@ -248,6 +260,43 @@ function serve(o: ServeOptions): void {
       process.exit(1);
     },
   );
+}
+
+const DEFAULT_FIRMWARE = fileURLToPath(new URL('../../firmware/out/codetalky.bin', import.meta.url));
+
+/** `codetalky firmware [file]`: offer that image to the connected devices. */
+function firmwareControl(store: FirmwareStore, body: unknown, log: (line: string) => void): PostReply {
+  const file = (body as { file?: unknown } | null)?.file;
+  if (typeof file !== 'string') return { status: 400, body: { error: 'which file?' } };
+  try {
+    const image = readImage(file);
+    const told = store.offer(image);
+    log(`firmware ${image.version} (${image.data.length} bytes) offered to ${told} device(s)`);
+    return { status: 200, body: { version: image.version, size: image.data.length, told } };
+  } catch (e) {
+    return { status: 400, body: { error: (e as Error).message } };
+  }
+}
+
+function firmwareCommand(port: number, file: string): void {
+  fetch(`http://127.0.0.1:${port}/firmware`, { method: 'POST', body: JSON.stringify({ file }) })
+    .then(async (res) => {
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok) {
+        console.error(String(data.error ?? res.status));
+        process.exit(1);
+      }
+      const told = Number(data.told);
+      console.log(
+        told > 0
+          ? `firmware ${String(data.version)} sent to ${told} device(s); each downloads it, checks it and restarts (about half a minute)`
+          : `firmware ${String(data.version)} is ready, but no connected device can take it (not paired, already on it, or too old to update itself)`,
+      );
+    })
+    .catch(() => {
+      console.error(`the bridge is not running on port ${port}`);
+      process.exit(1);
+    });
 }
 
 /** What `codetalky pair/devices/unpair` ask the running bridge to do. */

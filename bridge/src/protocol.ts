@@ -119,7 +119,13 @@ export type ToDevice =
   /** Pairing (plain): the value committed to in auth. The device can now show the code. */
   | { t: 'pairing'; r: string }
   /** The user approved the code on the computer. The first encrypted frame; the device answers with its own paired once the user confirms there too. */
-  | { t: 'paired' };
+  | { t: 'paired' }
+  /**
+   * New firmware (encrypted links only): download it over HTTP from this bridge at
+   * path, check it is size bytes with this SHA-256, install it and restart. Sent only
+   * to devices whose hello carries fw.
+   */
+  | { t: 'update'; path: string; size: number; sha256: string; version: string };
 
 /** An answer to a question: one option, several (multi), or the user's own words. */
 export type Choice = { option: number } | { options: number[] } | { text: string };
@@ -132,7 +138,8 @@ export type DeviceAction =
   | { t: 'seen'; seq: number; id: string };
 
 export type FromDevice =
-  | { t: 'hello'; proto: number; device: string; deviceId: string | null }
+  /** fw: the firmware version; present only on devices that can update themselves over the network. */
+  | { t: 'hello'; proto: number; device: string; deviceId: string | null; fw: string | null }
   /** Holds the pairing key: proof over the challenge and its own nonce (hex). */
   | { t: 'auth'; nonce: string; proof: string }
   /** Ask to pair: its side of the exchange (hex). It shows the code once the computer reveals its value. */
@@ -166,7 +173,8 @@ export function parseFromDevice(text: string): FromDevice | null {
   if (msg.t === 'hello') {
     if (typeof msg.proto !== 'number' || typeof msg.device !== 'string') return null;
     const deviceId = typeof msg.deviceId === 'string' && /^[0-9a-f]{16,32}$/.test(msg.deviceId) ? msg.deviceId : null;
-    return { t: 'hello', proto: msg.proto, device: msg.device.slice(0, 32), deviceId };
+    const fw = typeof msg.fw === 'string' && msg.fw.length > 0 ? msg.fw.slice(0, 32) : null;
+    return { t: 'hello', proto: msg.proto, device: msg.device.slice(0, 32), deviceId, fw };
   }
   const hex = (v: unknown, bytes: number): v is string => typeof v === 'string' && v.length === bytes * 2 && /^[0-9a-f]+$/.test(v);
   if (msg.t === 'auth') {
