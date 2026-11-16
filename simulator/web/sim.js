@@ -11,14 +11,16 @@
 // the entire panel.
 'use strict';
 
-// Placeholder panel behaviour. Calibrate against the real panel once it arrives.
+// Panel behaviour. Times measured on the real panel (firmware log, 2026-11-16, room
+// temperature): partial 560 ms, quick full 1018 ms, full 1021 ms, grey pass 143 ms.
+// Ghosting is still a guess.
 const PANEL = {
-  partialMs: 260, // small-area update
-  fastMs: 420, // page change with the quick waveform
-  fullMs: 1300, // full refresh, clears ghosting
+  partialMs: 560, // small-area update
+  fastMs: 1020, // page change with the quick waveform
+  fullMs: 1020, // full refresh, clears ghosting
   ghost: 0.07, // reflectance lost where a pixel went black -> white without a full refresh
   overlayDelayMs: 450, // how long the page must be still before the grey pass
-  overlayMs: 180, // the grey overlay pass itself (12 frames in the vendor waveform)
+  overlayMs: 145, // the grey overlay pass itself (12 frames in the vendor waveform)
 };
 const PAPER = [232, 230, 222];
 const INK = [30, 30, 30];
@@ -62,7 +64,7 @@ const widthOf = (r) => r.x2 - r.x1 + 1;
 const heightOf = (r) => r.y2 - r.y1 + 1;
 
 // Grey level per pixel of the framebuffer inside rect: 0 black, 1 dark, 2 light, 3 white.
-// Levels 0-1 are black and 2-3 white in the black-and-white pass.
+// Only 3 is white in the black-and-white pass; the grey pass lightens 1 and 2.
 function levelsOf(rect) {
   const w = widthOf(rect);
   const h = heightOf(rect);
@@ -74,7 +76,9 @@ function levelsOf(rect) {
     for (let x = 0; x < w; x++, j += 2) {
       const c = heap[j] | (heap[j + 1] << 8);
       const lum = ((c >> 11) & 0x1f) * 2.47 + ((c >> 5) & 0x3f) * 2.39 + (c & 0x1f) * 0.9;
-      out[y * w + x] = lum >= 213 ? 3 : lum >= 128 ? 2 : lum >= 43 ? 1 : 0;
+      // As the firmware (TEXT_WEIGHT 1 in firmware/main/epd.c): text read better one
+      // step darker on the real panel, so light edges show dark grey, darker ones black.
+      out[y * w + x] = lum >= 213 ? 3 : lum >= 128 ? 1 : 0;
     }
   }
   return out;
@@ -162,7 +166,8 @@ function scheduleOverlay(rect) {
 async function refresh(job) {
   const { box, levels, before, mode } = job;
   const started = performance.now();
-  const white = (k) => levels[k] >= 2;
+  // Black-and-white pass: everything that is not white is black (as the firmware).
+  const white = (k) => levels[k] === 3;
   if (mode === 2) {
     // Whole screen flashes black, then white, then settles on the new image with no ghosting.
     fill(box, () => 0);

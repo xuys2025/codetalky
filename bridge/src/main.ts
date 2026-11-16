@@ -31,6 +31,7 @@ import { DEFAULT_QUICK } from './link.ts';
 import { runManaged } from './run.ts';
 import { Runs } from './runs.ts';
 import { startServer, type PostReply } from './server.ts';
+import { startDiscovery } from './discovery.ts';
 
 const USAGE = `usage: node src/main.ts [--name N] [--fake] [--fake-only IDS] [--speed N] [--hold S]
                         [--host H] [--port P] [--no-sim] [--insecure-lan]
@@ -43,7 +44,8 @@ const USAGE = `usage: node src/main.ts [--name N] [--fake] [--fake-only IDS] [--
   --speed N       run the demo sessions N times faster (default 1)
   --hold S        how long a permission request or question waits for the device
                   before Claude Code asks in the terminal instead (default 570 seconds)
-  --host H        address to listen on (default 127.0.0.1)
+  --host H        address to listen on (default 0.0.0.0: devices on the network find this
+                  computer by themselves; 127.0.0.1 keeps it to this machine)
   --port P        port (default 8137)
   --no-sim        do not serve the browser simulator
   --insecure-lan  let devices from other machines in without pairing. Testing only:
@@ -114,7 +116,7 @@ function main(): void {
         'fake-only': { type: 'string' },
         speed: { type: 'string', default: '1' },
         hold: { type: 'string', default: '570' },
-        host: { type: 'string', default: '127.0.0.1' },
+        host: { type: 'string', default: '0.0.0.0' },
         port: { type: 'string', default: '8137' },
         'no-sim': { type: 'boolean', default: false },
         'insecure-lan': { type: 'boolean', default: false },
@@ -211,21 +213,32 @@ function serve(o: ServeOptions): void {
     flushMs: 150,
     log,
   }).then(
-    (server) => {
+    async (server) => {
+      const lan = o.host !== '127.0.0.1' && o.host !== 'localhost' && o.host !== '::1';
+      const local = o.host === '0.0.0.0' || o.host === '::' ? '127.0.0.1' : o.host;
       console.log(`CodeTalky bridge "${o.name}" on ws://${o.host}:${server.port}/device`);
       console.log(`Claude Code hooks: http://127.0.0.1:${server.port}/hooks/claude (set up with: node src/main.ts hooks)`);
-      if (simDir) console.log(`simulator: http://${o.host}:${server.port}/`);
+      if (simDir) console.log(`simulator: http://${local}:${server.port}/`);
       if (o.fake !== null) console.log(`fake agent: ${agents.length} sessions${o.speed === 1 ? '' : `, ${o.speed}x speed`}`);
+      // Devices on the network find this computer by a UDP broadcast on the same port number.
+      const discovery = lan
+        ? await startDiscovery({ port: server.port, wsPort: server.port, hostId: bridgeId(o.port), hostName: o.name, log }).catch(
+            (err: Error) => {
+              console.log(`devices cannot find this computer by themselves (UDP ${server.port}: ${err.message})`);
+              return null;
+            },
+          )
+        : null;
       if (o.insecureLan) {
         console.log('warning: --insecure-lan: no pairing yet, anyone who can reach this port can approve on your behalf');
-      } else if (o.host !== '127.0.0.1' && o.host !== 'localhost') {
-        console.log('devices on the network must pair first: the device shows a code, then run "codetalky pair <code>" here');
+      } else if (lan) {
+        console.log('devices on the network find this computer by themselves; the first time, run "codetalky pair" here to pair');
       }
       const stop = () => {
         for (const agent of agents) agent.stop();
         claude.stop();
         codex.stop();
-        server.close().then(() => process.exit(0));
+        Promise.all([server.close(), discovery?.close()]).then(() => process.exit(0));
       };
       process.once('SIGINT', stop);
       process.once('SIGTERM', stop);

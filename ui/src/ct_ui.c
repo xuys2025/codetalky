@@ -316,7 +316,7 @@ static void fmt_took(char *buf, size_t size, const ct_session_t *s) {
 
 /* Right side of a list row. */
 static void fmt_when(char *buf, size_t size, const ct_session_t *s) {
-    char a[32], b[24];
+    char a[32], b[32];
     if (at_computer(s)) {
         fmt_ago(buf, size, "等了 ", s->since);
         return;

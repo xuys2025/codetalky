@@ -1,0 +1,5 @@
+dependencies:
+  idf: ">=5.5"
+  # Same LVGL as the simulator (simulator/build.sh).
+  lvgl/lvgl: "==9.5.0"
+  espressif/esp_websocket_client: "^1.4.0"
